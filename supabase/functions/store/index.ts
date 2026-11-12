@@ -11,9 +11,9 @@ let key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
 try { const s = JSON.parse(Deno.env.get('SUPABASE_SECRET_KEYS') || '{}'); if (s.default) key = s.default; } catch { /* use legacy key */ }
 const db = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
 
-// CORS: GitHub Pages (any https://*.github.io) and localhost for testing. Tighten once the repo URL is known.
-const ALLOWED = [/^https:\/\/[a-z0-9-]+\.github\.io$/i, /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/];
-const allowed = (o: string | null) => !!o && ALLOWED.some((r) => r.test(o));
+// CORS: only the live GitHub Pages site may call this API from a browser.
+const ALLOWED = ['https://madfox6.github.io'];
+const allowed = (o: string | null) => !!o && ALLOWED.includes(o);
 function cors(req: Request): Record<string, string> {
   const o = req.headers.get('Origin');
   return allowed(o)
