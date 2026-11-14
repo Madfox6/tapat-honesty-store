@@ -1,6 +1,6 @@
-# Tapat · Honesty Store
+# Chingu Honesty Store
 
-Self-service honesty store: customers scan the entrance QR, pick items and pay by cash, a GCash / Maya / BPI / MariBank QR, or a split of both (QR payments need a receipt upload). The owner manages sales, stock, payment QRs and receipt review from `owner.html`.
+Self-service snack corner for Chingu Honesty Store: customers scan the entrance QR, pick items and pay by cash, a GCash / Maya / BPI / MariBank QR, or a split of both (QR payments need a receipt upload). The owner manages sales, stock, payment QRs and receipt review from `owner.html`.
 
 This repository is the **static frontend**, served by GitHub Pages. The backend runs on Supabase:
 
@@ -41,7 +41,7 @@ Optional hardening once the owner exists: Supabase → Authentication → Sign I
 
 ## CORS
 
-The function accepts browser requests from any `https://*.github.io` origin and `http://localhost` / `127.0.0.1` (for local testing). Tighten `ALLOWED` in the function to your exact Pages origin once the repo is live.
+The edge function accepts browser requests from the live Pages origin, `https://madfox6.github.io`. Local previews of the catalog need a mock `/api/catalog` because localhost is not allowed.
 
 ## Local preview
 
