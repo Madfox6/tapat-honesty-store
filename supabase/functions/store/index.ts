@@ -88,7 +88,7 @@ Deno.serve(async (req) => {
       const p = await req.json();
       need([p.name, p.cat, p.unit].every((x) => typeof x === 'string' && x.trim() && x.length < 120) && Number.isSafeInteger(p.price) && p.price > 0 && p.price <= 100000000 && Number.isSafeInteger(p.stock) && p.stock >= 0 && p.stock < 1000000, 'Check the product details');
       need(isUuid(p.id) || samples.includes(p.id), 'Invalid product');
-      need(samples.some((s) => '/photo/' + s === p.photo) || /^\/file\/image-[a-f0-9-]{36}$/.test(p.photo), 'Upload a product photo');
+      need(/^\/photo\/[a-z0-9-]{1,80}$/.test(p.photo) || /^\/file\/image-[a-f0-9-]{36}$/.test(p.photo), 'Upload a product photo');
       const row = { name: p.name, cat: p.cat, unit: p.unit, price: p.price, stock: p.stock, photo: p.photo, active: p.active ? 1 : 0 };
       const { data: existing, error } = await db.from('products').select('id').eq('id', p.id).maybeSingle();
       if (error) throw error;
