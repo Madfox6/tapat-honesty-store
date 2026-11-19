@@ -14,7 +14,7 @@ This repository is the **static frontend**, served by GitHub Pages. The backend 
 ## Files
 
 - `index.html` – customer storefront (store picker, shelf stock, ads, requests, receipt)
-- `owner.html` – owner dashboard (sales, inventory, requests, ads, expenses, email, payment QRs, entrance QR)
+- `owner.html` – owner dashboard (sales, inventory, requests, ads, expenses, email, payment QRs, entrance QR, team)
 - `app.js`, `store-logic.js`, `styles.css` – shared app code and styles
 - `config.js` – public settings: function URL, Supabase URL, **publishable** key, optional `SITE_URL`. Never put a secret / service-role key here.
 - `photos/` – the 8 sample product photos
@@ -37,7 +37,18 @@ All paths are relative, so the site works under the `/<repo>/` sub-path.
 3. Enter the one-time **setup key** and press **Link owner account**. The first signed-in account with the correct key becomes the owner; after that the store is claimed and the key no longer works.
 4. Upload your payment QRs under **Payment QRs**, adjust stock under **Inventory**, and print the entrance QR from **Store QR** (it encodes the current site URL, or `SITE_URL` from `config.js` if set).
 
-Optional hardening once the owner exists: Supabase → Authentication → Sign In / Providers → turn off "Allow new users to sign up".
+Optional hardening once the owner exists: Supabase → Authentication → Sign In / Providers → turn off "Allow new users to sign up". Adding someone from **Team** still works, because that invite is sent by the edge function with the service role.
+
+## Team
+
+Any owner can open **Team**, enter an email, and give that person the same access. If the email already has a Supabase Auth account, they can sign in with their current password. If it does not, Supabase emails an invite and the link opens a **Set your password** form on `owner.html`. **Forgot password?** on the sign-in screen uses that same form.
+
+Supabase → Authentication → URL Configuration must allow the dashboard URL or those emails will be rejected:
+
+- **Site URL:** `https://madfox6.github.io/tapat-honesty-store/owner.html` (or the storefront URL)
+- **Redirect URLs:** `https://madfox6.github.io/tapat-honesty-store/owner.html`
+
+The built-in Auth email sender is rate limited (a low hourly cap, shared by invites and password resets). Set custom SMTP under Authentication → Emails if the team will send more than a few.
 
 ## CORS
 
@@ -57,6 +68,7 @@ The live API only accepts the GitHub Pages origin, so localhost needs the demo s
 
 Merging to `main` publishes the site. Apply database and function changes before that merge, in this order:
 
-1. Run `supabase/migrations/20261119120000_multi_store.sql` once in the Supabase SQL editor.
-2. Deploy the `store` edge function from `supabase/functions/store/index.ts`.
-3. Optional email: set function secrets `RESEND_API_KEY` and `EMAIL_FROM`. Until both are set, the Email tab says email is not configured and checkout still completes.
+1. Run `supabase/migrations/20261119120000_multi_store.sql` once in the Supabase SQL editor, if it is not already applied.
+2. Run `supabase/migrations/20261119150000_store_owners.sql` once. It copies the current `config` owner into `store_owners`.
+3. Deploy the `store` edge function from `supabase/functions/store/index.ts`.
+4. Optional email: set function secrets `RESEND_API_KEY` and `EMAIL_FROM`. Until both are set, the Email tab says email is not configured and checkout still completes. Invites and password resets use Supabase Auth email, not Resend.

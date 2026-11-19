@@ -10,9 +10,19 @@ const own = /\/owner(\.html)?$/.test(location.pathname);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = (n) => L.money(n);
 const src = (p) => !p ? '' : p.startsWith('/photo/') ? 'photos/' + encodeURIComponent(p.slice(7)) + '.jpg' : p.startsWith('/file/') ? FN + p : p;
+const OWNER_PAGE = 'https://madfox6.github.io/tapat-honesty-store/owner.html';
+const preview = demo ? (new URLSearchParams(location.search).get('preview') || '') : '';
+(function rememberAuthLink() {
+  const hash = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+  const type = hash.get('type') || '';
+  if (type === 'invite' || type === 'recovery') sessionStorage.setItem('tapat-set-password', type);
+  const code = hash.get('error_code') || hash.get('error') || '';
+  if (code) sessionStorage.setItem('tapat-auth-error', /expired|otp/i.test(code + (hash.get('error_description') || '')) ? 'expired' : 'invalid');
+})();
 const sb = own && !demo && window.supabase ? window.supabase.createClient(C.SUPABASE_URL, C.PUBLISHABLE_KEY) : null;
-const TABS = ['Dashboard', 'Sales', 'Inventory', 'Requests', 'Ads', 'Expenses', 'Email', 'Payment QRs', 'Store QR'];
-const HASH = { dashboard: 'Dashboard', sales: 'Sales', inventory: 'Inventory', requests: 'Requests', ads: 'Ads', expenses: 'Expenses', email: 'Email', qrs: 'Payment QRs', qr: 'Store QR' };
+if (sb) sb.auth.onAuthStateChange((event) => { if (event === 'PASSWORD_RECOVERY') sessionStorage.setItem('tapat-set-password', 'recovery'); });
+const TABS = ['Dashboard', 'Sales', 'Inventory', 'Requests', 'Ads', 'Expenses', 'Email', 'Payment QRs', 'Store QR', 'Team'];
+const HASH = { dashboard: 'Dashboard', sales: 'Sales', inventory: 'Inventory', requests: 'Requests', ads: 'Ads', expenses: 'Expenses', email: 'Email', qrs: 'Payment QRs', qr: 'Store QR', team: 'Team' };
 const UIKEY = 'tapat-owner-ui';
 
 let ui = {};
@@ -370,12 +380,20 @@ function requestForm() {
   };
 }
 
+function authError(e, fallback) {
+  const err = $('#err');
+  const text = e && e.message ? e.message : fallback;
+  if (err && !dlg.open) err.textContent = text;
+  else fail(e);
+}
 async function signIn(create) {
   const email = $('#email').value.trim(), password = $('#pw').value;
+  const err = $('#err');
+  if (err) err.textContent = '';
   try {
     if (!email || password.length < 6) throw Error('Enter your email and a password of at least 6 characters');
     if (create) {
-      const { data: d, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: (C.SITE_URL || location.href).replace(/[?#].*$/, '').replace(/(owner(\.html)?|index\.html)$/, '') + 'owner.html' } });
+      const { data: d, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: OWNER_PAGE } });
       if (error) throw error;
       if (!d.session) { msg('Check your email to confirm your account, then sign in here.'); return; }
     } else {
@@ -383,29 +401,93 @@ async function signIn(create) {
       if (error) throw error;
     }
     await start();
-  } catch (e) { fail(e); }
+  } catch (e) { authError(e, 'Could not sign in'); }
 }
-async function signOut() { if (sb) await sb.auth.signOut(); session = null; location.reload(); }
+async function forgotPassword() {
+  const err = $('#err');
+  if (err) err.textContent = '';
+  try {
+    const email = $('#email').value.trim();
+    if (!email) throw Error('Enter your email, then use Forgot password?');
+    if (sb) {
+      const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: OWNER_PAGE });
+      if (error) {
+        if (/rate limit/i.test(error.message || '')) throw Error('Too many emails were sent. Wait a while and try again.');
+        throw Error(error.message || 'Could not send the reset email');
+      }
+    }
+    msg('If that email has an account, a reset link is on its way.');
+  } catch (e) { authError(e, 'Could not send the reset email'); }
+}
+async function savePassword() {
+  const err = $('#err');
+  if (err) err.textContent = '';
+  try {
+    const a = $('#pw1').value, b = $('#pw2').value;
+    if (a.length < 6) throw Error('Use at least 6 characters');
+    if (a !== b) throw Error('Those passwords do not match');
+    if (sb) {
+      const { error } = await sb.auth.updateUser({ password: a });
+      if (error) {
+        if (/rate limit/i.test(error.message || '')) throw Error('Too many attempts. Wait a while and try again.');
+        throw Error(error.message || 'Could not save the password');
+      }
+    }
+    sessionStorage.removeItem('tapat-set-password');
+    msg('Password saved');
+    if (preview === 'password') return;
+    await start();
+  } catch (e) { authError(e, 'Could not save the password'); }
+}
+async function signOut() {
+  sessionStorage.removeItem('tapat-set-password');
+  sessionStorage.removeItem('tapat-auth-error');
+  if (sb) await sb.auth.signOut();
+  session = null;
+  location.reload();
+}
+
+function setPasswordForm() {
+  const email = session?.user?.email || '';
+  main.innerHTML = '<form class="panel authpanel" id="pwform"><h2>Set your password</h2><p>Choose a password' + (email ? ' for <b>' + esc(email) + '</b>' : '') + '. You’ll use it the next time you sign in.</p><label>New password<span class="hint">At least 6 characters.</span><input type="password" id="pw1" autocomplete="new-password"></label><label>Confirm password<input type="password" id="pw2" autocomplete="new-password"></label><div class="authrow"><button type="submit" class="btn btn-primary" id="setpw">Save password</button><button type="button" class="btn btn-ghost" id="outbtn">Sign out</button></div><p class="error" id="err" role="alert"></p></form>';
+  $('#pwform').onsubmit = (e) => { e.preventDefault(); savePassword(); };
+  $('#outbtn').onclick = signOut;
+  $('#pw1').focus();
+}
+function accessGate(notice) {
+  const who = session ? '<p class="who">Signed in as ' + esc(session.user.email) + ' · <button type="button" class="linkish" id="out">Sign out</button></p>' : '';
+  const note = notice ? '<p class="notice">' + esc(notice) + '</p>' : '';
+  main.innerHTML = '<form class="panel authpanel" id="authform"><h2>Owner access</h2>' + note + (!session ? '<p>Sign in with the store owner’s account' + (data.claimed ? '' : ', or create one to set up this store') + '.</p><label>Email<input type="email" id="email" autocomplete="username"></label><label>Password<span class="hint">At least 6 characters.</span><input type="password" id="pw" autocomplete="current-password"></label><p class="authlinks"><button type="button" class="linkish" id="forgot">Forgot password?</button></p><div class="authrow"><button type="submit" class="btn btn-primary" id="signin">Sign in</button>' + (data.claimed ? '' : '<button type="button" class="btn btn-secondary" id="signup">Create account</button>') + '</div>' : data.claimed ? '<p>This account is not the store owner.</p><button type="button" class="btn btn-secondary" id="outbtn">Sign out</button>' : '<p>Enter the one-time setup key to link this store to your account.</p><label>Setup key<input type="password" id="key" autocomplete="off"></label><button type="submit" class="btn btn-primary" id="claim">Link owner account</button>') + who + '<p class="error" id="err" role="alert"></p></form>';
+  if ($('#authform')) $('#authform').onsubmit = (e) => {
+    e.preventDefault();
+    if ($('#claim')) {
+      api('/api/claim', { key: $('#key').value }).then(() => start()).catch((err) => authError(err, 'Could not link this account'));
+      return;
+    }
+    signIn(false);
+  };
+  if ($('#signup')) $('#signup').onclick = () => signIn(true);
+  if ($('#forgot')) $('#forgot').onclick = () => forgotPassword();
+  if ($('#out')) $('#out').onclick = signOut;
+  if ($('#outbtn')) $('#outbtn').onclick = signOut;
+}
 
 async function owner() {
   if (!demo && !sb) { main.textContent = 'Owner sign-in could not load. Check your connection and reload.'; return; }
-  if (!data.admin) {
-    await token();
-    const who = session ? '<p class="who">Signed in as ' + esc(session.user.email) + ' · <a href="#" id="out">Sign out</a></p>' : '';
-    main.innerHTML = '<div class="panel"><h2>Owner access</h2>' + (!session ? '<p>Sign in with the store owner’s account' + (data.claimed ? '' : ', or create one to set up this store') + '.</p><label>Email<input type="email" id="email" autocomplete="username"></label><label>Password<span class="hint">At least 6 characters.</span><input type="password" id="pw" autocomplete="current-password"></label><div class="authrow"><button type="button" class="btn btn-primary" id="signin">Sign in</button>' + (data.claimed ? '' : '<button type="button" class="btn btn-secondary" id="signup">Create account</button>') + '</div>' : data.claimed ? '<p>This account is not the store owner.</p><button type="button" class="btn btn-secondary" id="outbtn">Sign out</button>' : '<p>Enter the one-time setup key to link this store to your account.</p><label>Setup key<input type="password" id="key"></label><button type="button" class="btn btn-primary" id="claim">Link owner account</button>') + who + '<p class="error" id="err" role="alert"></p></div>';
-    if ($('#signin')) $('#signin').onclick = () => signIn(false);
-    if ($('#signup')) $('#signup').onclick = () => signIn(true);
-    if ($('#out')) $('#out').onclick = (e) => { e.preventDefault(); signOut(); };
-    if ($('#outbtn')) $('#outbtn').onclick = signOut;
-    if ($('#claim')) $('#claim').onclick = async () => { try { await api('/api/claim', { key: $('#key').value }); await start(); } catch (e) { fail(e); } };
-    return;
-  }
+  await token();
+  const pending = sessionStorage.getItem('tapat-set-password');
+  const linkError = sessionStorage.getItem('tapat-auth-error');
+  if (linkError) sessionStorage.removeItem('tapat-auth-error');
+  if (preview === 'password' || (pending && session)) return setPasswordForm();
+  if (pending && !session) sessionStorage.removeItem('tapat-set-password');
+  const expired = linkError ? 'That link has expired. Sign in, or request a new password reset.' : '';
+  if (!data.admin || preview === 'signin') return accessGate(expired);
   adminData = await api('/api/admin/data');
   shell();
 }
 
 const BOTTOM = ['Dashboard', 'Sales', 'Inventory', 'Ads'];
-const MORE = ['Requests', 'Expenses', 'Email', 'Payment QRs', 'Store QR'];
+const MORE = ['Requests', 'Expenses', 'Email', 'Payment QRs', 'Store QR', 'Team'];
 function goTab(name) { tab = name; saveUi({ tab }); const sheet = $('#moresheet'); if (sheet) sheet.hidden = true; paint(); }
 function shell() {
   const stores = ownerStores();
@@ -582,6 +664,21 @@ function paintBanks() {
   return '<section class="panel"><h2>Payment QRs</h2><p>Upload the receiving account’s QR image for each payment method. These are shared by every store.</p>' + Object.entries(data.banks).map(([b, f], i) => '<div class="line bankrow">' + (f ? '<img class="thumb" src="' + esc(src(f)) + '">' : '') + '<strong>' + esc(b) + '</strong><small>' + (f ? 'Configured' : 'Awaiting QR') + '</small><input class="push" type="file" aria-label="Upload ' + esc(b) + ' QR" accept="image/png,image/jpeg" data-bank="' + esc(b) + '" id="bank' + i + '"></div>').join('') + '</section>';
 }
 
+function paintTeam() {
+  const people = adminData.owners || [];
+  const ready = adminData.teamReady !== false && Array.isArray(adminData.owners);
+  const only = people.length <= 1;
+  const rows = people.map((o) => {
+    const you = !!o.you;
+    const blocked = you || only;
+    const why = you ? 'You cannot remove your own access' : 'The store needs at least one owner';
+    return '<div class="line ownerline"><div class="row"><div><div class="whoami"><b>' + esc(o.email) + '</b>' + (you ? '<span class="badge ok">You</span>' : '') + '</div><small>' + (o.addedAt ? 'Added ' + esc(whenManila(o.addedAt)) : 'Original owner') + '</small></div><button type="button" class="btn btn-danger" data-act="owner-remove" data-id="' + esc(o.userId) + '" data-email="' + esc(o.email) + '"' + (blocked ? ' disabled aria-disabled="true" title="' + esc(why) + '"' : '') + '>Remove</button></div></div>';
+  }).join('');
+  return (ready ? '' : '<p class="banner-warn"><b>The owner list is not in the database yet.</b> Apply the store owners migration, then reload.</p>') +
+    '<section class="panel"><h2>Owners</h2><p>Everyone here has the same access as you. There are no separate roles.</p><div class="tools team-add"><label class="field">Email<input id="owneremail" type="email" autocomplete="off" placeholder="name@email.com" aria-label="New owner email"' + (ready ? '' : ' disabled') + '></label><button type="button" class="btn btn-primary" data-act="owner-add"' + (ready ? '' : ' disabled') + '>Add owner</button></div>' +
+    (rows || '<div class="empty-state"><b>No owners yet</b></div>') + '</section>';
+}
+
 function paintQr() {
   const base = C.SITE_URL || location.href.replace(/[?#].*$/, '').replace(/(owner(\.html)?|index\.html)$/, '');
   let svg = '';
@@ -593,7 +690,7 @@ function paint() {
   const area = $('#area');
   if (!area) return;
   const focus = document.activeElement && area.contains(document.activeElement) ? document.activeElement.dataset.filter : '';
-  const views = { Dashboard: paintDashboard, Sales: paintSales, Inventory: paintInventory, Requests: paintRequests, Ads: paintAds, Expenses: paintExpenses, Email: paintEmail, 'Payment QRs': paintBanks, 'Store QR': paintQr };
+  const views = { Dashboard: paintDashboard, Sales: paintSales, Inventory: paintInventory, Requests: paintRequests, Ads: paintAds, Expenses: paintExpenses, Email: paintEmail, 'Payment QRs': paintBanks, 'Store QR': paintQr, Team: paintTeam };
   area.innerHTML = (views[tab] || paintDashboard)();
   if (focus) { const el = area.querySelector('[data-filter="' + focus + '"]'); if (el) { el.focus(); const n = el.value.length; if (el.setSelectionRange) el.setSelectionRange(n, n); } }
   area.querySelectorAll('[data-filter]').forEach((el) => el.oninput = () => { saveUi({ [el.dataset.filter]: el.value }); queuePaint(); });
@@ -636,6 +733,8 @@ function paint() {
     dl.onclick = () => save(new Blob([svg], { type: 'image/svg+xml' }), 'chingu-store-qr.svg');
   }
   document.querySelectorAll('[data-act="nav"]').forEach((el) => { el.classList.toggle('active', el.dataset.id === tab); el.setAttribute('aria-current', el.dataset.id === tab ? 'page' : 'false'); });
+  const moreBtn = document.querySelector('[data-act="more"]');
+  if (moreBtn) moreBtn.classList.toggle('active', MORE.includes(tab));
   const title = $('#pagetitle');
   if (title) title.textContent = tab === 'Inventory' ? 'Inventory' : tab;
   mountChipRails(area);
@@ -788,6 +887,26 @@ async function onClick(e) {
     }
     if (act === 'req') { await api('/api/admin/request-status', { id, status: b.dataset.status }); await reload(); return; }
     if (act === 'add-store') { modal('New store', '<label>Code<input id="scode" maxlength="6" placeholder="NEO"></label><label>Name<input id="sname" maxlength="80"></label><button type="button" class="btn btn-primary full" id="savestore">Add store</button>'); $('#savestore').onclick = async () => { try { await api('/api/admin/store', { code: $('#scode').value, name: $('#sname').value }); dlg.close(); await reload(); } catch (err) { fail(err); } }; return; }
+    if (act === 'owner-add') {
+      const email = $('#owneremail').value.trim();
+      if (!email) throw Error('Enter an email address');
+      b.disabled = true;
+      try {
+        const r = await api('/api/admin/owner', { email });
+        await reload();
+        msg(r.invited ? 'Invite sent. They can set a password from the email.' : 'Owner added. They can sign in with their existing password.');
+      } catch (err) { if (b.isConnected) b.disabled = false; throw err; }
+      return;
+    }
+    if (act === 'owner-remove') {
+      confirmBox('Remove this owner?', '<b>' + esc(b.dataset.email || 'This person') + '</b> will lose access to the dashboard. Their sign-in stays, but it will no longer open the store.', 'Remove', async () => {
+        await api('/api/admin/owner', { remove: id });
+        dlg.close();
+        await reload();
+        msg('Owner removed');
+      });
+      return;
+    }
     if (act === 'ad-edit') { editAd(id); return; }
     if (act === 'ad-move') { await moveAd(id, Number(b.dataset.n)); return; }
     if (act === 'expense-add') { const amount = Math.round(Number($('#expamount').value) * 100); await api('/api/admin/expense', { amount, note: $('#expnote').value, category: $('#expcat').value, storeId: $('#expstore').value, ts: $('#expdate').value ? fromManilaInput($('#expdate').value + 'T00:00') : new Date().toISOString() }); await reload(); msg('Expense added'); return; }
