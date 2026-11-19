@@ -1,6 +1,6 @@
 # Chingu Honesty Store
 
-Self-service snack corner for Chingu Honesty Store: customers scan the entrance QR, pick items and pay by cash, a GCash / Maya / BPI / MariBank QR, or a split of both (QR payments need a receipt upload). The owner manages sales, stock, payment QRs and receipt review from `owner.html`.
+Self-service snack corner for Chingu Honesty Store: customers scan the entrance QR, pick a store, take items from that shelf, and pay by cash, a GCash / Maya / BPI / MariBank QR, or a split of both (QR payments need a receipt upload). The owner manages sales, shelf and warehouse stock, ads, requests, expenses, and optional email from `owner.html`.
 
 This repository is the **static frontend**, served by GitHub Pages. The backend runs on Supabase:
 
@@ -13,9 +13,9 @@ This repository is the **static frontend**, served by GitHub Pages. The backend 
 
 ## Files
 
-- `index.html` – customer storefront
-- `owner.html` – owner dashboard (sign in, claim, sales, inventory, payment QRs, entrance QR)
-- `app.js`, `styles.css` – shared app code and styles
+- `index.html` – customer storefront (store picker, shelf stock, ads, requests, receipt)
+- `owner.html` – owner dashboard (sales, inventory, requests, ads, expenses, email, payment QRs, entrance QR)
+- `app.js`, `store-logic.js`, `styles.css` – shared app code and styles
 - `config.js` – public settings: function URL, Supabase URL, **publishable** key, optional `SITE_URL`. Never put a secret / service-role key here.
 - `photos/` – the 8 sample product photos
 - `vendor/` – pinned copies of supabase-js (UMD) and qrcode-generator
@@ -45,5 +45,18 @@ The edge function accepts browser requests from the live Pages origin, `https://
 
 ## Local preview
 
-    python3 -m http.server 8000
-    # open http://localhost:8000/
+The live API only accepts the GitHub Pages origin, so localhost needs the demo server:
+
+    node test/mock-server.mjs
+    # storefront http://localhost:8765/?demo=1
+    # owner     http://localhost:8765/owner.html?demo=1
+
+`?demo=1` is ignored on the published site. Calculations in `store-logic.js` can be checked with `node --test test/store-logic.test.mjs`.
+
+## Apply a backend change
+
+Merging to `main` publishes the site. Apply database and function changes before that merge, in this order:
+
+1. Run `supabase/migrations/20261119120000_multi_store.sql` once in the Supabase SQL editor.
+2. Deploy the `store` edge function from `supabase/functions/store/index.ts`.
+3. Optional email: set function secrets `RESEND_API_KEY` and `EMAIL_FROM`. Until both are set, the Email tab says email is not configured and checkout still completes.
