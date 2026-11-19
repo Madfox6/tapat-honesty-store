@@ -74,6 +74,10 @@ const subscribers = [
   { id: 's2', email: 'juan@example.com', storeId: 'O15', active: 1, ts: hours(3) },
 ];
 const sends = [];
+const owners = [
+  { userId: '11111111-1111-4111-8111-111111111111', email: 'owner@chingu.test', addedAt: hours(24 * 40), you: true },
+  { userId: '22222222-2222-4222-8222-222222222222', email: 'ana@example.com', addedAt: hours(30), you: false },
+];
 
 function shelf(store, id) { return stock[store + ':' + id]?.shelf ?? 0; }
 function catalog(storeId) {
@@ -100,6 +104,8 @@ function admin() {
     stocks: Object.values(stock),
     orders: orders.map((o) => ({ ...o, items: JSON.stringify(o.items) })),
     ads, requests, expenses, subscribers, sends,
+    teamReady: true,
+    owners,
   };
 }
 
@@ -122,6 +128,21 @@ export async function handle(req, res) {
     const send = (code, data) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
     if (url.pathname === '/api/catalog') return send(200, catalog((url.searchParams.get('store') || '').toUpperCase()));
     if (url.pathname === '/api/admin/data') return send(200, admin());
+    if (url.pathname === '/api/admin/owner') {
+      if (body.remove) {
+        if (body.remove === '11111111-1111-4111-8111-111111111111') return send(400, { error: 'You cannot remove your own access' });
+        if (owners.length <= 1) return send(400, { error: 'The store needs at least one owner' });
+        const i = owners.findIndex((o) => o.userId === body.remove);
+        if (i < 0) return send(404, { error: 'Unknown owner' });
+        owners.splice(i, 1);
+        return send(200, { ok: true });
+      }
+      const email = String(body.email || '').trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 200) return send(400, { error: 'Check the email address' });
+      if (owners.some((o) => o.email === email)) return send(409, { error: 'That person is already an owner' });
+      owners.push({ userId: crypto.randomUUID(), email, addedAt: new Date().toISOString(), you: false });
+      return send(200, { ok: true, invited: true });
+    }
     if (url.pathname === '/api/ad-event') {
       const ad = ads.find((a) => a.id === body.id);
       if (ad) body.kind === 'click' ? ad.clicks++ : ad.views++;

@@ -7,6 +7,7 @@ const BUCKET = 'store-files';
 const banks = ['GCash', 'Maya (PayMaya)', 'BPI', 'MariBank'];
 const samples = ['bread', 'banana', 'milk', 'croissant', 'apple', 'coffee', 'orange', 'eggs'];
 const SITE = 'https://madfox6.github.io/tapat-honesty-store/';
+const OWNER_PAGE = 'https://madfox6.github.io/tapat-honesty-store/owner.html';
 
 const url = Deno.env.get('SUPABASE_URL')!;
 let key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
@@ -67,6 +68,51 @@ async function val(k: string): Promise<string | undefined> {
   const { data, error } = await db.from('config').select('v').eq('k', k).maybeSingle();
   if (error) throw error;
   return data?.v;
+}
+function missingRelation(error: { code?: string; message?: string } | null) {
+  if (!error) return false;
+  const code = error.code || '';
+  return code === 'PGRST205' || code === '42P01' || /schema cache/i.test(error.message || '');
+}
+async function findAuthUser(email: string): Promise<{ id: string; email?: string } | null> {
+  const root = url.replace(/\/$/, '');
+  for (let page = 1; page <= 5; page++) {
+    const res = await fetch(root + '/auth/v1/admin/users?page=' + page + '&per_page=200&filter=' + encodeURIComponent(email), {
+      headers: { apikey: key, Authorization: 'Bearer ' + key },
+    });
+    if (!res.ok) {
+      console.error('auth user lookup', res.status);
+      throw new HttpError('Could not look up that account', 502);
+    }
+    const body = await res.json().catch(() => ({}));
+    const users: { id?: string; email?: string }[] = Array.isArray(body) ? body : Array.isArray(body?.users) ? body.users : [];
+    const hit = users.find((u) => String(u?.email || '').toLowerCase() === email);
+    if (hit?.id) return { id: String(hit.id), email: hit.email };
+    if (users.length < 200) return null;
+  }
+  return null;
+}
+async function accountForOwner(email: string) {
+  const existing = await findAuthUser(email);
+  if (existing && isUuid(existing.id)) return { ...existing, invited: false };
+  const { data, error } = await db.auth.admin.inviteUserByEmail(email, { redirectTo: OWNER_PAGE });
+  if (!error) {
+    const id = data?.user?.id || '';
+    need(isUuid(id), 'The invite email could not be sent', 502);
+    return { id, email: data?.user?.email || email, invited: true };
+  }
+  const code = (error as { code?: string }).code || '';
+  const message = error.message || '';
+  if (code === 'email_exists' || /already been registered/i.test(message)) {
+    const again = await findAuthUser(email);
+    if (!again || !isUuid(again.id)) throw new HttpError('That account already exists, but it could not be linked', 409);
+    return { ...again, invited: false };
+  }
+  if ((error as { status?: number }).status === 429 || /rate limit/i.test(message)) {
+    throw new HttpError('Too many emails were sent. Wait a while and try again.', 429);
+  }
+  console.error('invite failed', code, message.slice(0, 180));
+  throw new HttpError('The invite email could not be sent', 502);
 }
 async function objectExists(name: string) {
   const { data, error } = await db.storage.from(BUCKET).list('', { search: name, limit: 5 });
@@ -159,14 +205,22 @@ Deno.serve(async (req) => {
     const path = u.pathname.replace(/^(\/functions\/v1)?\/store(?=\/|$)/, '') || '/';
 
     let who: string | null = null;
+    let whoEmail = '';
     const auth = req.headers.get('Authorization') || '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
     if (token && token.split('.').length === 3) {
       const { data } = await db.auth.getUser(token);
       who = data?.user?.id ?? null;
+      whoEmail = String(data?.user?.email || '').trim().toLowerCase();
     }
-    const owner = await val('owner');
-    const admin = !!who && owner === who;
+    const listed = await db.from('store_owners').select('user_id,email,added_by,added_at').order('added_at', { ascending: true });
+    const ownersMissing = missingRelation(listed.error);
+    if (listed.error && !ownersMissing) throw listed.error;
+    const owners = ownersMissing ? [] : (listed.data || []);
+    const legacyOwner = await val('owner');
+    const inTable = !!who && owners.some((o) => o.user_id === who);
+    const admin = inTable || (!!who && (ownersMissing || owners.length === 0) && legacyOwner === who);
+    const claimed = !!legacyOwner || owners.length > 0;
     if (req.method !== 'GET') need(allowed(req.headers.get('Origin')), 'Open the store page to continue', 403);
 
     if (path === '/api/unsub') {
@@ -227,7 +281,7 @@ Deno.serve(async (req) => {
         stores: storeRows,
         store: chosen,
         ads: chosen ? visibleAds : [],
-        admin, claimed: !!owner, email: mailer().ok,
+        admin, claimed, email: mailer().ok,
       });
     }
 
@@ -235,9 +289,13 @@ Deno.serve(async (req) => {
       need(req.method === 'POST', 'Invalid request', 405);
       const { key: k } = await readJson(req);
       const h = await sha256(String(k ?? ''));
-      need(!owner && who && h === SETUP, 'Invalid setup key or sign-in required', 403);
+      need(!claimed && who && h === SETUP, 'Invalid setup key or sign-in required', 403);
       const { error } = await db.from('config').insert({ k: 'owner', v: who });
       need(!error, 'Invalid setup key or sign-in required', 403);
+      if (!ownersMissing && emailOk(whoEmail)) {
+        const { error: e2 } = await db.from('store_owners').insert({ user_id: who, email: whoEmail, added_by: null });
+        if (e2 && e2.code !== '23505') throw e2;
+      }
       return json({ ok: true });
     }
 
@@ -311,7 +369,54 @@ Deno.serve(async (req) => {
         expenses: (expenses.data || []).map((row) => ({ id: row.id, storeId: row.store_id, amount: row.amount, note: row.note, category: row.category, ts: row.ts })),
         subscribers: subs.data?.map((row) => ({ id: row.id, email: row.email, storeId: row.store_id, active: row.active, ts: row.ts })) || [],
         sends: (sends.data || []).map((row) => ({ id: row.id, ts: row.ts, storeId: row.store_id, subject: row.subject, template: row.template, recipients: row.recipients, test: row.test })),
+        teamReady: !ownersMissing,
+        owners: (ownersMissing && admin && who ? [{ user_id: who, email: whoEmail || 'owner', added_at: null }] : owners).map((row) => ({
+          userId: row.user_id,
+          email: row.email,
+          addedAt: row.added_at,
+          you: row.user_id === who,
+        })),
       });
+    }
+
+    if (path === '/api/admin/owner') {
+      need(req.method === 'POST', 'Invalid request', 405);
+      need(!ownersMissing, 'Apply the store owners migration, then retry', 503);
+      const body = await readJson(req);
+      if (body.remove) {
+        const id = body.remove;
+        need(isUuid(id), 'Unknown owner');
+        need(id !== who, 'You cannot remove your own access');
+        need(owners.length > 1, 'The store needs at least one owner');
+        need(owners.some((o) => o.user_id === id), 'Unknown owner', 404);
+        if (legacyOwner === id) {
+          const next = owners.find((o) => o.user_id !== id);
+          need(next, 'The store needs at least one owner');
+          const { error } = await db.from('config').update({ v: next.user_id }).eq('k', 'owner');
+          if (error) throw error;
+        }
+        const { error } = await db.from('store_owners').delete().eq('user_id', id);
+        if (error) {
+          if (error.code === 'P0001' || /LAST_OWNER/.test(error.message || '')) throw new HttpError('The store needs at least one owner');
+          throw error;
+        }
+        return json({ ok: true });
+      }
+      const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+      need(emailOk(email), 'Check the email address');
+      need(!owners.some((o) => o.email === email), 'That person is already an owner', 409);
+      const known = await findAuthUser(email);
+      if (known && owners.some((o) => o.user_id === known.id)) throw new HttpError('That person is already an owner', 409);
+      const account = known && isUuid(known.id) ? { ...known, invited: false } : await accountForOwner(email);
+      need(!owners.some((o) => o.user_id === account.id), 'That person is already an owner', 409);
+      const stored = String(account.email || email).trim().toLowerCase();
+      need(emailOk(stored), 'Check the email address');
+      const { error } = await db.from('store_owners').insert({ user_id: account.id, email: stored, added_by: who });
+      if (error) {
+        if (error.code === '23505') throw new HttpError('That person is already an owner', 409);
+        throw error;
+      }
+      return json({ ok: true, invited: account.invited });
     }
 
     if (path === '/api/admin/product') {
