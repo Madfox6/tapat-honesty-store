@@ -56,13 +56,76 @@ function confirmBox(title, copy, yesLabel, onYes) {
   modal(title, '<p>' + copy + '</p><div class="dialog-actions"><button type="button" class="btn btn-secondary" data-act="close">Cancel</button><button type="button" class="btn btn-danger" id="confirm-yes">' + yesLabel + '</button></div>');
   $('#confirm-yes').onclick = onYes;
 }
+function shortStoreLabel(id, name) {
+  const clean = String(name || '').replace(/\s+floor$/i, '').replace(/\s+/g, ' ').trim();
+  if (clean && clean.length <= 14) return clean;
+  const two = clean.split(' ').slice(0, 2).join(' ');
+  if (two && two.length <= 14) return two;
+  return id || clean || 'Store';
+}
+const SWAP_ICON = '<svg class="swapicon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5"/></svg>';
+const CHEVRON_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M6 3.2 10.8 8 6 12.8"/></svg>';
 function showStoreChip() {
   const chip = $('#storechip');
   if (!chip) return;
   if (own || picking || !storeId) { chip.hidden = true; return; }
+  const name = storeName(storeId);
   chip.hidden = false;
-  chip.innerHTML = esc(storeName(storeId)) + ' <span aria-hidden="true">· Switch</span>';
-  chip.setAttribute('aria-label', 'Switch store, currently ' + storeName(storeId));
+  chip.innerHTML = '<span class="storechip-full">' + esc(name) + '</span><span class="storechip-short">' + esc(shortStoreLabel(storeId, name)) + '</span>' + SWAP_ICON + '<span class="storechip-action" aria-hidden="true">Switch</span>';
+  chip.setAttribute('aria-label', 'Switch store, currently ' + name);
+}
+function syncChipRail(row) {
+  const rail = row.closest('.chiprail');
+  if (!rail) return;
+  const max = row.scrollWidth - row.clientWidth;
+  const left = row.scrollLeft > 2;
+  const right = max > 2 && row.scrollLeft < max - 2;
+  rail.classList.toggle('can-left', left);
+  rail.classList.toggle('can-right', right);
+  const prev = rail.querySelector('.chiprail-btn.prev');
+  const next = rail.querySelector('.chiprail-btn.next');
+  if (prev) prev.hidden = !left;
+  if (next) next.hidden = !right;
+}
+function revealChip(row, chip) {
+  const rowBox = row.getBoundingClientRect();
+  const box = chip.getBoundingClientRect();
+  const pad = 18;
+  if (box.left < rowBox.left + pad) row.scrollBy({ left: box.left - rowBox.left - pad, behavior: 'smooth' });
+  else if (box.right > rowBox.right - pad) row.scrollBy({ left: box.right - rowBox.right + pad, behavior: 'smooth' });
+}
+function focusActiveChip(row) {
+  if (!row) return;
+  const active = row.querySelector('.chip.active, .chip[aria-pressed="true"]');
+  if (active) revealChip(row, active);
+}
+function mountChipRails(scope) {
+  (scope || document).querySelectorAll('.chips').forEach((row) => {
+    if (!row.closest('.chiprail')) {
+      const rail = document.createElement('div');
+      rail.className = 'chiprail';
+      row.parentNode.insertBefore(rail, row);
+      const prev = document.createElement('button');
+      prev.type = 'button';
+      prev.className = 'chiprail-btn prev';
+      prev.setAttribute('aria-label', 'Scroll categories left');
+      prev.innerHTML = CHEVRON_ICON;
+      prev.hidden = true;
+      const next = document.createElement('button');
+      next.type = 'button';
+      next.className = 'chiprail-btn next';
+      next.setAttribute('aria-label', 'Scroll categories right');
+      next.innerHTML = CHEVRON_ICON;
+      next.hidden = true;
+      rail.append(prev, row, next);
+      const step = () => Math.max(140, Math.round(row.clientWidth * 0.72));
+      prev.addEventListener('click', () => row.scrollBy({ left: -step(), behavior: 'smooth' }));
+      next.addEventListener('click', () => row.scrollBy({ left: step(), behavior: 'smooth' }));
+      row.addEventListener('scroll', () => syncChipRail(row), { passive: true });
+      if (window.ResizeObserver) new ResizeObserver(() => syncChipRail(row)).observe(row);
+    }
+    syncChipRail(row);
+  });
 }
 function toManilaInput(iso) { if (!iso) return ''; const w = new Date(new Date(iso).getTime() + 8 * 3600000); return w.toISOString().slice(0, 16); }
 function fromManilaInput(v) { return v ? new Date(v + ':00+08:00').toISOString() : null; }
@@ -140,6 +203,8 @@ function renderFilters() {
     const n = c === 'All items' ? pool.length : pool.filter((p) => p.cat === c).length;
     return '<button type="button" class="chip' + (c === cat ? ' active' : '') + '" data-act="cat" data-id="' + esc(c) + '" aria-pressed="' + (c === cat) + '">' + esc(c) + ' <span class="count">' + n + '</span></button>';
   }).join('');
+  mountChipRails(f.parentElement);
+  requestAnimationFrame(() => focusActiveChip(f));
 }
 
 function stockBadge(n) {
@@ -573,6 +638,8 @@ function paint() {
   document.querySelectorAll('[data-act="nav"]').forEach((el) => { el.classList.toggle('active', el.dataset.id === tab); el.setAttribute('aria-current', el.dataset.id === tab ? 'page' : 'false'); });
   const title = $('#pagetitle');
   if (title) title.textContent = tab === 'Inventory' ? 'Inventory' : tab;
+  mountChipRails(area);
+  requestAnimationFrame(() => area.querySelectorAll('.chips').forEach(focusActiveChip));
 }
 
 async function reload() {
