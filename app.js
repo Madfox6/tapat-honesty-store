@@ -21,8 +21,11 @@ const preview = demo ? (new URLSearchParams(location.search).get('preview') || '
 })();
 const sb = own && !demo && window.supabase ? window.supabase.createClient(C.SUPABASE_URL, C.PUBLISHABLE_KEY) : null;
 if (sb) sb.auth.onAuthStateChange((event) => { if (event === 'PASSWORD_RECOVERY') sessionStorage.setItem('tapat-set-password', 'recovery'); });
-const TABS = ['Dashboard', 'Sales', 'Inventory', 'Requests', 'Ads', 'Expenses', 'Email', 'Payment QRs', 'Store QR', 'Team', 'Settings'];
-const HASH = { dashboard: 'Dashboard', sales: 'Sales', inventory: 'Inventory', requests: 'Requests', ads: 'Ads', expenses: 'Expenses', email: 'Email', qrs: 'Payment QRs', qr: 'Store QR', team: 'Team', settings: 'Settings' };
+const TABS = ['Dashboard', 'Café', 'Sales', 'Inventory', 'Requests', 'Ads', 'Expenses', 'Email', 'Payment QRs', 'Store QR', 'Team', 'Settings'];
+const HASH = { dashboard: 'Dashboard', cafe: 'Café', sales: 'Sales', inventory: 'Inventory', requests: 'Requests', ads: 'Ads', expenses: 'Expenses', email: 'Email', qrs: 'Payment QRs', qr: 'Store QR', team: 'Team', settings: 'Settings' };
+const CAFE_SIZES = ['Reg', 'Med', 'Lrg'];
+const CAFE_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const CAFE_STATUS_LABEL = { Preparing: 'Start preparing', Ready: 'Mark ready', 'Out for delivery': 'Out for delivery', Completed: 'Complete', Cancelled: 'Cancel' };
 const UIKEY = 'tapat-owner-ui';
 
 let ui = {};
@@ -31,6 +34,8 @@ function saveUi(patch) { ui = Object.assign(ui, patch || {}); localStorage.setIt
 if (HASH[location.hash.slice(1)]) ui.tab = HASH[location.hash.slice(1)];
 
 let cat = 'All items', search = '', data, adminData, tab = ui.tab || 'Dashboard';
+let cafe = null, cafeOpen = false, cafeBack = 'pick', cafeCat = 'All', cafeSearch = '', cafeExpanded = '';
+let cafeCart = loadCafeCart(), cafeProof = '', cafeFulfil = 'pickup', cafeArea = '';
 let carts = L.loadAllCarts(localStorage.getItem('tapat-cart') || '');
 let storeId = (new URLSearchParams(location.search).get('store') || localStorage.getItem('tapat-store') || '').toUpperCase();
 let picking = false, proof = '', timer, session = null, selected = new Set(), paintTimer;
@@ -60,7 +65,21 @@ async function blobOf(path) { const h = {}; const t = await token(); if (t) h.Au
 function save(blob, name) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); }
 async function downloadFile(p, name) { try { save(p.startsWith('/file/') ? await blobOf(p) : await (await fetch(src(p))).blob(), name); } catch (e) { fail(e); } }
 function msg(s, kind) { const t = $('#toast'); t.hidden = false; t.className = 'toast ' + (kind === 'error' ? 'error' : 'ok'); t.textContent = s; clearTimeout(timer); timer = setTimeout(() => t.hidden = true, 4500); }
-function modal(title, body, wide) { dlg.classList.toggle('wide', !!wide); dlg.innerHTML = '<div class="row"><h2 id="dlg-title">' + title + '</h2><button type="button" class="icon-btn" data-act="close" aria-label="Close">×</button></div>' + body + '<p class="error" id="err" role="alert"></p>'; dlg.setAttribute('aria-labelledby', 'dlg-title'); if (!dlg.open) dlg.showModal(); }
+function modal(title, body, wide) {
+  dlg.classList.toggle('wide', !!wide);
+  dlg.innerHTML = '<div class="row"><h2 id="dlg-title">' + title + '</h2><button type="button" class="icon-btn" data-act="close" aria-label="Close">×</button></div>' + body + '<p class="error" id="err" role="alert"></p>';
+  dlg.setAttribute('aria-labelledby', 'dlg-title');
+  const float = $('#float');
+  if (float) float.hidden = true;
+  if (!dlg.dataset.cartwatch) {
+    dlg.dataset.cartwatch = '1';
+    dlg.addEventListener('close', () => {
+      if (cafeOpen && $('#cart')) cafeBasket();
+      else if (!cafeOpen && $('#cart')) basket();
+    });
+  }
+  if (!dlg.open) dlg.showModal();
+}
 function fail(e) { const text = e && e.message ? e.message : 'Something went wrong'; if (dlg.open && $('#err')) $('#err').textContent = text; else msg(text, 'error'); }
 function confirmBox(title, copy, yesLabel, onYes) {
   modal(title, '<p>' + copy + '</p><div class="dialog-actions"><button type="button" class="btn btn-secondary" data-act="close">Cancel</button><button type="button" class="btn btn-danger" id="confirm-yes">' + yesLabel + '</button></div>');
@@ -78,7 +97,7 @@ const CHEVRON_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidde
 function showStoreChip() {
   const chip = $('#storechip');
   if (!chip) return;
-  if (own || picking || !storeId) { chip.hidden = true; return; }
+  if (own || picking || cafeOpen || !storeId) { chip.hidden = true; return; }
   const name = storeName(storeId);
   chip.hidden = false;
   chip.innerHTML = '<span class="storechip-full">' + esc(name) + '</span><span class="storechip-short">' + esc(shortStoreLabel(storeId, name)) + '</span>' + SWAP_ICON + '<span class="storechip-action" aria-hidden="true">Switch</span>';
@@ -143,9 +162,11 @@ function whenManila(ts) { return new Date(ts).toLocaleString('en-PH', { timeZone
 function queuePaint() { clearTimeout(paintTimer); paintTimer = setTimeout(paint, 160); }
 
 async function start() {
-  const asked = (new URLSearchParams(location.search).get('store') || '').toUpperCase();
+  const params = new URLSearchParams(location.search);
+  const asked = (params.get('store') || '').toUpperCase();
   if (asked) storeId = asked;
-  data = await api('/api/catalog' + (storeId && !own ? '?store=' + encodeURIComponent(storeId) : ''));
+  const wantCafe = !own && params.get('cafe') === '1';
+  data = await api('/api/catalog' + (storeId && !own && !wantCafe ? '?store=' + encodeURIComponent(storeId) : ''));
   if (storeId && !(data.stores || []).some((s) => s.id === storeId)) storeId = '';
   if (storeId) localStorage.setItem('tapat-store', storeId);
   const nav = $('#nav');
@@ -153,6 +174,10 @@ async function start() {
   nav.textContent = own ? 'Storefront' : 'Owner';
   nav.href = own ? './' : 'owner.html';
   if (own) return owner();
+  if (dlg.open) dlg.close();
+  if (wantCafe) return openCafe(false);
+  cafeOpen = false;
+  document.title = 'Chingu Honesty Store';
   if (!storeId) return picker();
   storefront();
 }
@@ -162,7 +187,7 @@ function picker() {
   showStoreChip();
   const remembered = localStorage.getItem('tapat-store') || '';
   const cards = (data.stores || []).map((s) => '<button type="button" class="storecard' + (s.id === remembered ? ' remembered' : '') + '" data-act="pick" data-id="' + esc(s.id) + '"><span class="codepill">' + esc(s.id) + '</span><h2>' + esc(s.name) + '</h2><p>' + (s.shelfUnits || 0) + ' on the shelf</p>' + (s.id === remembered ? '<span class="badge low">Last shopped here</span>' : '') + '<span class="btn btn-primary">Shop this store</span></button>').join('');
-  main.innerHTML = '<section class="hero"><div class="eyebrow">Chingu Honesty Store</div><h1>Which store are you at?</h1><p>Same prices at every store. Stock is counted on that shelf only.</p></section><div class="storegrid">' + (cards || '<div class="empty-state"><b>No stores yet</b><p>Ask the owner to add one.</p></div>') + '</div>';
+  main.innerHTML = '<section class="hero"><div class="eyebrow">Chingu Honesty Store</div><h1>Which store are you at?</h1><p>Same prices at every store. Stock is counted on that shelf only.</p></section><div class="storegrid">' + (cards || '<div class="empty-state"><b>No stores yet</b><p>Ask the owner to add one.</p></div>') + '</div>' + cafeEntry();
 }
 
 function storefront() {
@@ -170,7 +195,7 @@ function storefront() {
   showStoreChip();
   const store = data.store || { id: storeId, name: storeName(storeId) };
   const hero = (data.ads || []).length ? '<section class="carousel" id="carousel" aria-roledescription="carousel" aria-label="Store ads"></section>' : '<section class="hero"><div class="eyebrow">' + esc(store.name) + '</div><h1>Grab, pay, enjoy.</h1><p>Pick a snack, pay the exact total, and go.</p></section>';
-  main.innerHTML = hero + '<div class="stickytop"><div class="heading"><div><p class="eyebrow">' + esc(store.id) + ' · ' + esc(store.name) + '</p><h2>Shop the shelves</h2></div></div><div class="searchrow"><input class="search" type="search" placeholder="Search products" aria-label="Search products"></div><div class="chips" id="filters" role="toolbar" aria-label="Categories"></div></div><div class="layout"><section><div class="grid" id="grid"></div></section><aside class="panel cart" id="cart"></aside></div><button type="button" class="cartbar" id="float">View cart</button>';
+  main.innerHTML = hero + '<div class="stickytop"><div class="heading shophead"><div><p class="eyebrow">' + esc(store.id) + ' · ' + esc(store.name) + '</p><h2>Shop the shelves</h2></div><button type="button" class="btn btn-primary coffeebtn" data-act="cafe">Order coffee ☕</button></div><div class="searchrow"><input class="search" type="search" placeholder="Search products" aria-label="Search products"></div><div class="chips" id="filters" role="toolbar" aria-label="Categories"></div></div><div class="layout"><section><div class="grid" id="grid"></div></section><aside class="panel cart" id="cart"></aside></div><button type="button" class="cartbar" id="float">View cart</button>';
   $('.search').value = search;
   $('.search').oninput = (e) => { search = e.target.value; renderFilters(); renderProducts(); };
   $('#float').onclick = () => $('#cart').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -329,9 +354,19 @@ async function submit() {
 
 function loadImage(url) { return new Promise((res, rej) => { const img = new Image(); img.onload = () => res(img); img.onerror = rej; img.src = url; }); }
 
+function clipReceipt(g, text, max) {
+  let s = String(text || '');
+  if (g.measureText(s).width <= max) return s;
+  while (s.length > 1 && g.measureText(s + '…').width > max) s = s.slice(0, -1);
+  return s + '…';
+}
+
 async function drawReceipt(model) {
+  if (document.fonts && document.fonts.ready) await document.fonts.ready;
   const canvas = $('#receipt') || document.createElement('canvas');
-  const height = 250 + model.items.length * 34;
+  const details = model.items.filter((item) => item.detail).length;
+  const extra = (model.whenLine ? 1 : 0) + (model.forName ? 1 : 0) + details;
+  const height = 290 + (model.items.length + extra) * 34;
   canvas.width = 720;
   canvas.height = height;
   const g = canvas.getContext('2d');
@@ -343,7 +378,7 @@ async function drawReceipt(model) {
   g.font = '800 30px Nunito, sans-serif';
   g.fillText('Chingu Honesty Store', 36, 52);
   g.font = '700 18px Nunito, sans-serif';
-  g.fillText(model.store, 36, 86);
+  g.fillText(clipReceipt(g, model.store, 520), 36, 86);
   try { const logo = await loadImage('logo-mark.png'); g.drawImage(logo, 590, 16, 88, 88); } catch { /* logo is optional */ }
   g.fillStyle = '#1E1E1E';
   g.font = '800 22px Nunito, sans-serif';
@@ -351,13 +386,32 @@ async function drawReceipt(model) {
   g.font = '600 16px Nunito, sans-serif';
   g.fillStyle = '#7A5A3C';
   g.fillText(whenManila(model.when), 36, 186);
-  let y = 230;
+  let y = 220;
+  if (model.forName) {
+    g.font = '700 16px Nunito, sans-serif';
+    g.fillText(clipReceipt(g, model.forName, 640), 36, y);
+    y += 28;
+  }
+  if (model.whenLine) {
+    g.fillStyle = '#C44E12';
+    g.font = '800 16px Nunito, sans-serif';
+    g.fillText(clipReceipt(g, model.whenLine, 640), 36, y);
+    y += 34;
+  } else y = 230;
   g.font = '700 18px Nunito, sans-serif';
   model.items.forEach((item) => {
     g.fillStyle = '#2B2420';
-    g.fillText(item.qty + ' × ' + item.name, 36, y);
-    g.fillText(money(item.line), 520, y);
+    g.fillText(clipReceipt(g, item.qty + ' × ' + item.name, 470), 36, y);
+    const price = money(item.line);
+    g.fillText(price, 684 - g.measureText(price).width, y);
     y += 34;
+    if (item.detail) {
+      g.fillStyle = '#7A5A3C';
+      g.font = '600 15px Nunito, sans-serif';
+      g.fillText(clipReceipt(g, item.detail, 620), 52, y);
+      g.font = '700 18px Nunito, sans-serif';
+      y += 28;
+    }
   });
   g.fillStyle = '#C44E12';
   g.font = '800 26px Nunito, sans-serif';
@@ -486,8 +540,8 @@ async function owner() {
   shell();
 }
 
-const BOTTOM = ['Dashboard', 'Sales', 'Inventory', 'Ads'];
-const MORE = ['Requests', 'Expenses', 'Email', 'Payment QRs', 'Store QR', 'Team', 'Settings'];
+const BOTTOM = ['Dashboard', 'Café', 'Sales', 'Inventory'];
+const MORE = ['Requests', 'Ads', 'Expenses', 'Email', 'Payment QRs', 'Store QR', 'Team', 'Settings'];
 function goTab(name) { tab = name; saveUi({ tab }); const sheet = $('#moresheet'); if (sheet) sheet.hidden = true; paint(); }
 function shell() {
   const stores = ownerStores();
@@ -546,7 +600,14 @@ function paintDashboard() {
     '<div class="chartgrid">' + list('Top 10', 'sec-top', top, 'No sales in this range.') + list('Profit by product', 'sec-profit', profitRows, 'No sales in this range.') + '</div>' +
     '<div class="chartgrid">' + list('Restock', 'sec-restock', restock, 'Shelves look fine.') + list('Slow movers', 'sec-slow', slow, 'Nothing has been quiet for two weeks.') + '</div>' +
     '<div class="chartgrid">' + list('Sale performance', 'sec-sale', salesPerf, 'Nothing is on sale.') + list('Ad performance', 'sec-ads', adPerf, 'No ads yet.') + '</div>' +
-    list('Total per store', 'sec-aov', stores, 'No stores.') ;
+    list('Total per store', 'sec-aov', stores, 'No stores.') + cafeDashBlock(model);
+}
+
+function cafeDashBlock(model) {
+  const info = adminData.cafe;
+  if (!info || !info.ready) return '<section class="panel" id="sec-cafe"><h2>Café</h2><p class="muted">Café sales show up here after the café migration is applied.</p></section>';
+  const row = L.cafeSales(info.orders, model.range.start, model.range.end);
+  return '<section class="panel" id="sec-cafe"><h2>Café</h2><div class="line"><div class="row"><b>Hello Chingu Café</b><span>' + money(row.total) + ' · ' + row.orders + (row.orders === 1 ? ' order' : ' orders') + '</span></div><small>Ore 15th Floor · counted on its own. Cancelled orders are left out.</small></div></section>';
 }
 
 function paintSales() {
@@ -680,11 +741,11 @@ function paintTeam() {
 }
 
 function paintSettings() {
-  const t = adminData.telegram || { token: false, salesChat: false, stocksChat: false };
+  const t = adminData.telegram || { token: false, salesChat: false, stocksChat: false, coffeeChat: false };
   const row = (label, on) => '<div class="line"><div class="row"><b>' + esc(label) + '</b><span class="badge ' + (on ? 'ok' : 'out') + '">' + (on ? 'Configured' : 'Not set') + '</span></div></div>';
-  return '<section class="panel"><h2>Telegram</h2><p>Sales go to the sales group with the payment screenshot. Low stock, empty shelves, and restocks go to the stocks group.</p>' +
-    row('Bot token', !!t.token) + row('Sales chat', !!t.salesChat) + row('Stocks chat', !!t.stocksChat) +
-    '<button type="button" class="btn btn-primary" data-act="telegram-test">Send test message</button><p class="hint">This page only shows whether each one is set.</p></section>';
+  return '<section class="panel"><h2>Telegram</h2><p>Sales go to the sales group with the payment screenshot. Low stock, empty shelves, and restocks go to the stocks group. Coffee orders go to the coffee group.</p>' +
+    row('Bot token', !!t.token) + row('Sales chat', !!t.salesChat) + row('Stocks chat', !!t.stocksChat) + row('Coffee chat', !!t.coffeeChat) +
+    '<button type="button" class="btn btn-primary" data-act="telegram-test">Send test message</button><p class="hint">This page only shows whether each one is set. The coffee chat id is telegram_coffee_chat_id.</p></section>';
 }
 
 function paintQr() {
@@ -698,7 +759,7 @@ function paint() {
   const area = $('#area');
   if (!area) return;
   const focus = document.activeElement && area.contains(document.activeElement) ? document.activeElement.dataset.filter : '';
-  const views = { Dashboard: paintDashboard, Sales: paintSales, Inventory: paintInventory, Requests: paintRequests, Ads: paintAds, Expenses: paintExpenses, Email: paintEmail, 'Payment QRs': paintBanks, 'Store QR': paintQr, Team: paintTeam, Settings: paintSettings };
+  const views = { Dashboard: paintDashboard, Café: paintCafe, Sales: paintSales, Inventory: paintInventory, Requests: paintRequests, Ads: paintAds, Expenses: paintExpenses, Email: paintEmail, 'Payment QRs': paintBanks, 'Store QR': paintQr, Team: paintTeam, Settings: paintSettings };
   area.innerHTML = (views[tab] || paintDashboard)();
   if (focus) { const el = area.querySelector('[data-filter="' + focus + '"]'); if (el) { el.focus(); const n = el.value.length; if (el.setSelectionRange) el.setSelectionRange(n, n); } }
   area.querySelectorAll('[data-filter]').forEach((el) => el.oninput = () => { saveUi({ [el.dataset.filter]: el.value }); queuePaint(); });
@@ -853,6 +914,7 @@ async function onClick(e) {
   const act = b.dataset.act;
   const id = b.dataset.id || '';
   try {
+    if (await cafeClick(act, id, b)) return;
     if (act === 'close') { dlg.close(); return; }
     if (act === 'reload') { location.reload(); return; }
     if (act === 'pick') { await choose(id); return; }
@@ -924,7 +986,7 @@ async function onClick(e) {
       b.disabled = true;
       try {
         const r = await api('/api/admin/telegram', {});
-        const where = (r.sent || []).map((name) => name === 'sales' ? 'sales group' : 'stocks group');
+        const where = (r.sent || []).map((name) => name === 'sales' ? 'sales group' : name === 'coffee' ? 'coffee group' : 'stocks group');
         msg(where.length ? 'Test message sent to the ' + where.join(' and the ') : 'Test message sent');
       } finally { if (b.isConnected) b.disabled = false; }
       return;
@@ -1000,5 +1062,473 @@ async function sendEmail(act) {
   await reload();
 }
 
+function loadCafeCart() {
+  try {
+    const raw = JSON.parse(localStorage.getItem('tapat-cafe-cart') || '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((line) => line && typeof line.id === 'string' && typeof line.itemId === 'string' && typeof line.size === 'string' && Array.isArray(line.addons) && line.qty > 0 && line.qty <= 20).slice(0, 30);
+  } catch (e) { return []; }
+}
+function saveCafeCart() { localStorage.setItem('tapat-cafe-cart', JSON.stringify(cafeCart)); }
+function cafeEntry() {
+  return '<button type="button" class="cafecard" data-act="cafe"><span class="codepill">Café</span><span><h2>Order coffee ☕</h2><p>Hello Chingu Café · Ore 15th Floor. Pickup, or delivery in the building.</p></span><span class="btn btn-primary">See the menu</span></button>';
+}
+function cafeCatName(item) { return (cafe?.categories || []).find((row) => row.id === item.categoryId)?.name || ''; }
+function cafePool() {
+  const q = cafeSearch.trim().toLowerCase();
+  return (cafe?.items || []).filter((item) => (item.name + ' ' + cafeCatName(item)).toLowerCase().includes(q));
+}
+function offeredSizes(item) { return CAFE_SIZES.filter((size) => item.sizes && Number.isInteger(item.sizes[size]) && item.sizes[size] > 0); }
+function sizePrices(item) { return offeredSizes(item).map((size) => size + ' ' + money(item.sizes[size])).join(' · '); }
+function cafeLineUnit(line) {
+  const item = (cafe?.items || []).find((row) => row.id === line.itemId);
+  if (!item || !item.available) return null;
+  const unit = item.sizes && item.sizes[line.size];
+  if (!Number.isInteger(unit) || unit <= 0) return null;
+  let add = 0;
+  for (const addonId of line.addons || []) {
+    const addon = (cafe.addons || []).find((row) => row.id === addonId);
+    if (!addon || !Number.isInteger(addon.price)) return null;
+    add += addon.price;
+  }
+  return unit + add;
+}
+function cafeLineLabel(line) {
+  const item = (cafe?.items || []).find((row) => row.id === line.itemId);
+  const names = (line.addons || []).map((addonId) => (cafe.addons || []).find((row) => row.id === addonId)?.name).filter(Boolean);
+  return { title: (item?.name || 'Drink') + ' (' + line.size + ')', detail: [names.length ? '+ ' + names.join(', ') : '', line.note || ''].filter(Boolean).join(' · ') };
+}
+function cafeCartSubtotal() {
+  let total = 0;
+  for (const line of cafeCart) {
+    const unit = cafeLineUnit(line);
+    if (unit == null) return null;
+    total += unit * line.qty;
+  }
+  return total;
+}
+function selectedSize(card) { return card.querySelector('[data-act="cafe-size"].active')?.dataset.size || ''; }
+function selectedAddons(card) { return [...card.querySelectorAll('.addonlist input:checked')].map((el) => el.value); }
+function updateDrinkPrice(card) {
+  const item = (cafe?.items || []).find((row) => row.id === card.dataset.id);
+  const unit = item && item.sizes[selectedSize(card)];
+  let add = 0;
+  selectedAddons(card).forEach((addonId) => { const addon = (cafe.addons || []).find((row) => row.id === addonId); if (addon) add += addon.price; });
+  const qty = Number(card.querySelector('[data-qty]')?.textContent || 1);
+  const label = card.querySelector('[data-line]');
+  if (label && unit) label.textContent = money((unit + add) * qty);
+}
+
+async function openCafe(push) {
+  if (dlg.open) dlg.close();
+  cafeBack = picking || !storeId ? 'pick' : 'store';
+  if (push !== false) {
+    const url = new URL(location.href);
+    if (url.searchParams.get('cafe') !== '1') {
+      url.searchParams.set('cafe', '1');
+      history.pushState({ cafe: 1 }, '', url);
+    }
+  }
+  cafeOpen = true;
+  picking = false;
+  showStoreChip();
+  document.title = 'Order coffee · Hello Chingu Café';
+  main.setAttribute('aria-busy', 'true');
+  try {
+    cafe = await api('/api/cafe');
+    renderCafe();
+  } finally { main.removeAttribute('aria-busy'); }
+}
+function closeCafe() {
+  if (dlg.open) dlg.close();
+  if (history.state && history.state.cafe) { history.back(); return; }
+  const url = new URL(location.href);
+  url.searchParams.delete('cafe');
+  history.replaceState({}, '', url);
+  cafeOpen = false;
+  document.title = 'Chingu Honesty Store';
+  if (cafeBack === 'store' && storeId) storefront();
+  else picker();
+}
+function renderCafe() {
+  if (!cafe || !cafe.ready) {
+    main.innerHTML = '<section class="hero"><div class="eyebrow">Hello Chingu Café</div><h1>Order coffee ☕</h1><p>The menu is not open yet.</p><button type="button" class="btn btn-secondary" data-act="cafe-back">Back</button></section><div class="panel empty-state"><b>Coffee orders are not open yet</b><p class="muted">Ask the owner to finish setting up the café.</p></div>';
+    return;
+  }
+  const notice = !cafe.accepting ? '<p class="banner-warn"><b>Not taking coffee orders right now.</b> You can still look at the menu.</p>' : !(cafe.slots || []).length ? '<p class="banner-warn"><b>No times are open today or tomorrow.</b></p>' : '';
+  main.innerHTML = '<section class="hero"><div class="eyebrow">Hello Chingu Café · Ore 15th Floor</div><h1>Order coffee ☕</h1><p>' + esc(cafe.today || 'Pickup at the café, or delivery anywhere in the building.') + ' Delivery is ' + money(cafe.deliveryFee || 0) + '.</p><button type="button" class="btn btn-secondary" data-act="cafe-back">Back</button></section>' + notice + '<div class="stickytop"><div class="searchrow"><input class="search" type="search" placeholder="Search drinks" aria-label="Search drinks"></div><div class="chips" id="filters" role="toolbar" aria-label="Drink categories"></div></div><div class="layout"><section><div class="grid" id="grid"></div></section><aside class="panel cart" id="cart"></aside></div><button type="button" class="cartbar" id="float">View order</button>';
+  const box = $('.search');
+  box.value = cafeSearch;
+  box.oninput = (e) => { cafeSearch = e.target.value; renderCafeFilters(); renderCafeGrid(); };
+  $('#float').onclick = () => $('#cart').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  renderCafeFilters();
+  renderCafeGrid();
+  cafeBasket();
+}
+function renderCafeFilters() {
+  const row = $('#filters');
+  if (!row) return;
+  const names = ['All', ...(cafe.categories || []).map((item) => item.name)];
+  if (!names.includes(cafeCat)) cafeCat = 'All';
+  const pool = cafePool();
+  row.innerHTML = names.map((name) => {
+    const n = name === 'All' ? pool.length : pool.filter((item) => cafeCatName(item) === name).length;
+    return '<button type="button" class="chip' + (name === cafeCat ? ' active' : '') + '" data-act="cafe-cat" data-id="' + esc(name) + '" aria-pressed="' + (name === cafeCat) + '">' + esc(name) + ' <span class="count">' + n + '</span></button>';
+  }).join('');
+  mountChipRails(row.parentElement);
+  requestAnimationFrame(() => focusActiveChip(row));
+}
+function renderCafeGrid() {
+  const grid = $('#grid');
+  if (!grid) return;
+  const list = cafePool().filter((item) => cafeCat === 'All' || cafeCatName(item) === cafeCat);
+  grid.innerHTML = list.map((item) => {
+    const open = cafeExpanded === item.id && item.available;
+    const badges = (item.starred ? '<span class="badge low" aria-label="Favourite">★</span>' : '') + (item.mustTry ? '<span class="tag">Must try</span>' : '') + (item.available ? '' : '<span class="badge out">Sold out</span>');
+    const sizes = offeredSizes(item);
+    const controls = !open ? '' : '<div class="customize"><div class="seg sizeseg" role="group" aria-label="Size">' + sizes.map((size, i) => '<button type="button" class="segbtn' + (i ? '' : ' active') + '" data-act="cafe-size" data-size="' + size + '" aria-pressed="' + (!i) + '">' + size + ' · ' + money(item.sizes[size]) + '</button>').join('') + '</div><div class="addonlist">' + (cafe.addons || []).map((addon) => '<label class="checkline"><input type="checkbox" value="' + esc(addon.id) + '"> ' + esc(addon.name) + ' <span class="muted">+' + money(addon.price) + '</span></label>').join('') + '</div><div class="row"><div class="stepper" aria-label="Quantity"><button type="button" class="icon-btn" data-act="cafe-qty" data-n="-1" aria-label="Less">−</button><span data-qty>1</span><button type="button" class="icon-btn" data-act="cafe-qty" data-n="1" aria-label="More">+</button></div><b data-line>' + money(item.sizes[sizes[0]] || 0) + '</b></div><label>Note for this drink<span class="hint">Optional. Up to 80 characters.</span><input data-note maxlength="80" placeholder="Less sweet, no ice"></label><button type="button" class="btn btn-primary full" data-act="cafe-add">Add to cart</button></div>';
+    const action = item.available ? '<button type="button" class="btn btn-primary" data-act="cafe-open" data-id="' + esc(item.id) + '">' + (open ? 'Close' : 'Customize') + '</button>' : '<button type="button" class="btn" disabled>Sold out</button>';
+    return '<article class="card drink' + (open ? ' is-open' : '') + '" id="drink-' + esc(item.id) + '" data-id="' + esc(item.id) + '"><div class="info"><div class="row"><small>' + esc(cafeCatName(item)) + '</small><span class="badges">' + badges + '</span></div><h3>' + esc(item.name) + '</h3><p class="muted">' + esc(sizePrices(item)) + '</p>' + controls + '<div class="row">' + action + '</div></div></article>';
+  }).join('') || '<div class="panel empty-state"><b>Nothing matches</b><p class="muted">Try another word or category.</p></div>';
+}
+function cafeBasket() {
+  const cart = $('#cart');
+  if (!cart || !cafe) return;
+  const count = cafeCart.reduce((sum, line) => sum + line.qty, 0);
+  const sub = cafeCartSubtotal();
+  const blocked = !cafe.accepting || !(cafe.slots || []).length || sub == null || !cafeCart.length;
+  const rows = cafeCart.map((line) => {
+    const unit = cafeLineUnit(line);
+    const label = cafeLineLabel(line);
+    return '<div class="line"><strong>' + esc(label.title) + '</strong>' + (label.detail ? '<small>' + esc(label.detail) + '</small>' : '') + '<div class="row"><div class="stepper"><button type="button" class="icon-btn" data-act="cafe-line" data-id="' + esc(line.id) + '" data-n="-1" aria-label="Remove one">−</button><span>' + line.qty + '</span><button type="button" class="icon-btn" data-act="cafe-line" data-id="' + esc(line.id) + '" data-n="1" aria-label="Add one"' + (line.qty >= 20 ? ' disabled' : '') + '>+</button></div><b>' + (unit == null ? 'Unavailable' : money(unit * line.qty)) + '</b></div></div>';
+  }).join('');
+  cart.innerHTML = '<div class="row"><h2>Your order</h2><span class="count">' + count + (count === 1 ? ' drink' : ' drinks') + '</span></div>' + (rows || '<div class="empty"><b>No drinks yet</b><p class="muted">Choose a size and any add-ons, then add the drink here.</p></div>') + '<div class="row total"><b>Subtotal</b><b>' + (sub == null ? '—' : money(sub)) + '</b></div><p class="muted">Building delivery adds ' + money(cafe.deliveryFee || 0) + '.</p><button type="button" class="btn btn-primary full" data-act="cafe-checkout"' + (blocked ? ' disabled' : '') + '>Checkout</button>';
+  const float = $('#float');
+  if (float) { float.innerHTML = '<span>' + count + (count === 1 ? ' drink' : ' drinks') + '</span><span>View order</span><strong>' + (sub == null ? '' : money(sub)) + '</strong>'; float.hidden = !count; }
+}
+function slotOptions(slots) {
+  const group = (day, label) => {
+    const rows = (slots || []).filter((slot) => slot.day === day);
+    if (!rows.length) return '';
+    return '<optgroup label="' + label + '">' + rows.map((slot) => '<option value="' + esc(slot.at) + '">' + esc(slot.time) + '</option>').join('') + '</optgroup>';
+  };
+  return '<option value="">Choose a time</option>' + group('today', 'Today') + group('tomorrow', 'Tomorrow');
+}
+function syncCafeCheckout() {
+  const delivery = cafeFulfil === 'delivery';
+  const box = $('#cafe-delivery');
+  if (box) box.hidden = !delivery;
+  const other = $('#cafe-other');
+  if (other) other.hidden = cafeArea !== 'other';
+  document.querySelectorAll('[data-act="cafe-fulfil"]').forEach((btn) => { const on = btn.dataset.id === cafeFulfil; btn.classList.toggle('active', on); btn.setAttribute('aria-pressed', String(on)); });
+  document.querySelectorAll('[data-act="cafe-area"]').forEach((btn) => { const on = btn.dataset.id === cafeArea; btn.classList.toggle('active', on); btn.setAttribute('aria-pressed', String(on)); });
+  const sub = cafeCartSubtotal() || 0;
+  const fee = delivery ? (cafe.deliveryFee || 0) : 0;
+  const due = $('#cafe-due');
+  if (due) due.innerHTML = 'Subtotal ' + money(sub) + (delivery ? ' · Delivery ' + money(fee) : '') + '<br><b>Pay ' + money(sub + fee) + '</b>';
+}
+async function openCafeCheckout() {
+  cafe = await api('/api/cafe');
+  if (!cafe.ready) throw Error('Coffee orders are not open yet');
+  if (!cafe.accepting) throw Error('The café is not taking coffee orders right now.');
+  if (!(cafe.slots || []).length) throw Error('No times are open today or tomorrow.');
+  if (cafeCartSubtotal() == null) { renderCafe(); throw Error('A drink in your cart changed. Review the order.'); }
+  cafeFulfil = 'pickup';
+  cafeArea = '';
+  cafeProof = '';
+  const areas = cafe.areas || [];
+  modal('Coffee checkout', '<div class="seg" role="group" aria-label="Pickup or delivery"><button type="button" class="segbtn active" data-act="cafe-fulfil" data-id="pickup" aria-pressed="true">Pickup</button><button type="button" class="segbtn" data-act="cafe-fulfil" data-id="delivery" aria-pressed="false">Delivery +' + money(cafe.deliveryFee || 0) + '</button></div><p class="muted">Pickup is at Hello Chingu Café, Ore 15th Floor.</p><div id="cafe-delivery" hidden><p class="hint">Where in the building?</p><div class="chips chipwrap" role="group" aria-label="Delivery area">' + areas.map((area) => '<button type="button" class="chip" data-act="cafe-area" data-id="' + esc(area.id) + '" aria-pressed="false">' + esc(area.name) + '</button>').join('') + '<button type="button" class="chip" data-act="cafe-area" data-id="other" aria-pressed="false">Other</button></div><label id="cafe-other" hidden>Building or floor<input id="cafe-area-text" maxlength="80" placeholder="Tower, floor, or wing"></label><label>Desk or area<input id="cafe-spot" maxlength="80" placeholder="Desk 4B, pantry, reception"></label></div><label>Time<span class="hint">Today or tomorrow, Manila time.</span><select id="cafe-slot">' + slotOptions(cafe.slots) + '</select></label><label>Your name<input id="cafe-name" maxlength="80" autocomplete="name" required></label><label>Note for the café<span class="hint">Optional.</span><input id="cafe-note" maxlength="200"></label><p id="cafe-due" class="notice"></p><ol class="steps"><li><b>1</b><span>Scan the GCash or Maya QR.</span></li><li><b>2</b><span>Pay the exact total.</span></li><li><b>3</b><span>Upload the screenshot and place the order.</span></li></ol><label>Pay with<select id="cafe-bank">' + Object.keys(cafe.banks || {}).map((bank) => '<option>' + esc(bank) + '</option>').join('') + '</select></label><div id="cafe-qr"></div><label class="dropzone">Tap to upload the payment screenshot<span class="hint">JPG or PNG, up to 5 MB</span><input type="file" id="cafe-receipt" accept="image/jpeg,image/png"><div id="cafe-preview"></div></label><button type="button" class="btn btn-primary full" id="cafe-submit">Place order</button>', true);
+  const showBank = () => {
+    const bank = $('#cafe-bank');
+    const file = (cafe.banks || {})[bank.value];
+    $('#cafe-qr').innerHTML = file ? '<img class="qr" src="' + esc(src(file)) + '" alt="' + esc(bank.value) + ' payment QR">' : '<p class="notice">This QR has not been set up yet. Choose another one.</p>';
+    $('#cafe-submit').disabled = !file;
+  };
+  $('#cafe-bank').onchange = () => { cafeProof = ''; const input = $('#cafe-receipt'); if (input) input.value = ''; $('#cafe-preview').innerHTML = ''; showBank(); };
+  $('#cafe-receipt').onchange = () => { cafeProof = ''; const file = $('#cafe-receipt').files[0]; $('#cafe-preview').innerHTML = file ? '<img alt="Payment screenshot preview" src="' + URL.createObjectURL(file) + '">' : ''; };
+  $('#cafe-submit').onclick = submitCafe;
+  showBank();
+  syncCafeCheckout();
+}
+async function submitCafe() {
+  const button = $('#cafe-submit');
+  button.disabled = true;
+  button.classList.add('is-loading');
+  try {
+    const slot = $('#cafe-slot').value;
+    const customer = $('#cafe-name').value.trim();
+    const note = $('#cafe-note').value.trim();
+    const spot = cafeFulfil === 'delivery' ? $('#cafe-spot').value.trim() : '';
+    const areaText = cafeFulfil === 'delivery' && cafeArea === 'other' ? $('#cafe-area-text').value.trim() : '';
+    if (!slot) throw Error('Choose a pickup or delivery time');
+    if (!customer) throw Error('Add your name so the café can find you');
+    if (cafeFulfil === 'delivery' && !cafeArea) throw Error('Choose where to deliver');
+    if (cafeFulfil === 'delivery' && cafeArea === 'other' && !areaText) throw Error('Tell us which building or floor');
+    if (cafeFulfil === 'delivery' && !spot) throw Error('Tell us the desk or area');
+    if (!cafeProof) {
+      const file = $('#cafe-receipt').files[0];
+      if (file) cafeProof = await upload(file, '/api/proof');
+      else if (demo) cafeProof = '/file/proof-' + crypto.randomUUID();
+      else throw Error('Upload your payment screenshot');
+    }
+    const sig = JSON.stringify(cafeCart.map((line) => [line.itemId, line.size, line.addons, line.qty, line.note]));
+    if (sessionStorage.getItem('tapat-cafe-sig') !== sig || !sessionStorage.getItem('tapat-cafe-attempt')) {
+      sessionStorage.setItem('tapat-cafe-sig', sig);
+      sessionStorage.setItem('tapat-cafe-attempt', crypto.randomUUID());
+    }
+    const r = await api('/api/cafe/order', {
+      id: sessionStorage.getItem('tapat-cafe-attempt'),
+      items: cafeCart.map((line) => ({ id: line.itemId, size: line.size, addons: line.addons, qty: line.qty, note: line.note || '' })),
+      fulfilment: cafeFulfil, areaId: cafeFulfil === 'delivery' ? cafeArea : '', areaText, spot, customer, note, slot,
+      bank: $('#cafe-bank').value, proof: cafeProof,
+    });
+    cafeCart = [];
+    saveCafeCart();
+    sessionStorage.removeItem('tapat-cafe-attempt');
+    sessionStorage.removeItem('tapat-cafe-sig');
+    const bought = (r.items || []).map((item) => {
+      const addons = (item.addons || []).map((addon) => addon.name).filter(Boolean);
+      return { name: item.name + ' (' + item.size + ')', qty: item.qty, price: Math.round(item.line / item.qty), detail: [addons.length ? '+ ' + addons.join(', ') : '', item.note || ''].filter(Boolean).join(' · ') };
+    });
+    modal('Order placed', '<p>Order <b>' + esc(r.num || '') + '</b> is with the café.</p><canvas id="receipt" class="receipt" aria-label="Receipt preview"></canvas><button type="button" class="btn btn-primary full" id="getreceipt">Download receipt</button><button type="button" class="btn btn-secondary full" data-act="cafe">Back to the menu</button>', true);
+    const model = L.receiptModel({ num: r.num, storeName: r.store || 'Hello Chingu Café', ts: new Date().toISOString(), total: r.total, items: bought, whenLine: r.whenLine || '', forName: r.customer ? 'For ' + r.customer : '' });
+    const blob = await drawReceipt(model);
+    $('#getreceipt').onclick = () => save(blob, (r.num || 'receipt') + '.png');
+  } catch (e) {
+    fail(e);
+    try {
+      cafe = await api('/api/cafe');
+      const select = $('#cafe-slot');
+      if (select) { const current = select.value; select.innerHTML = slotOptions(cafe.slots || []); if ([...select.options].some((opt) => opt.value === current)) select.value = current; }
+    } catch (err) { /* keep the form */ }
+    if (button && button.isConnected) { button.disabled = false; button.classList.remove('is-loading'); }
+  }
+}
+
+function cafeNext(order) {
+  const ready = order.fulfilment === 'delivery' ? 'Out for delivery' : 'Ready';
+  if (order.status === 'New') return ['Preparing', 'Cancelled'];
+  if (order.status === 'Preparing') return [ready, 'Cancelled'];
+  if (order.status === 'Ready' || order.status === 'Out for delivery') return ['Completed', 'Cancelled'];
+  return [];
+}
+function paintCafe() {
+  const info = adminData.cafe;
+  if (!info || !info.ready) return '<section class="panel"><p class="banner-warn"><b>The café menu is not in the database yet.</b> Apply the café migration, then reload.</p></section>';
+  const section = ui.cafeTab || 'orders';
+  const seg = '<div class="seg" role="group" aria-label="Café sections">' + [['orders', 'Orders'], ['menu', 'Menu'], ['hours', 'Hours']].map(([key, label]) => '<button type="button" class="segbtn' + (section === key ? ' active' : '') + '" data-act="cafe-tab" data-id="' + key + '" aria-pressed="' + (section === key) + '">' + label + '</button>').join('') + '</div>';
+  return seg + (section === 'menu' ? paintCafeMenu(info) : section === 'hours' ? paintCafeHours(info) : paintCafeOrders(info));
+}
+function paintCafeOrders(info) {
+  const q = (ui.cafeQ || '').toLowerCase();
+  const status = ui.cafeStatus || 'All';
+  let base = (info.orders || []).filter((order) => !q || (order.num + ' ' + order.customer + ' ' + (order.items || []).map((item) => item.name).join(' ')).toLowerCase().includes(q));
+  const counts = { All: base.length };
+  ['New', 'Preparing', 'Ready', 'Out for delivery', 'Completed', 'Cancelled'].forEach((name) => { counts[name] = base.filter((order) => order.status === name).length; });
+  let rows = status === 'All' ? base : base.filter((order) => order.status === status);
+  const rank = { New: 0, Preparing: 1, Ready: 2, 'Out for delivery': 2, Completed: 3, Cancelled: 4 };
+  rows = rows.slice().sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9) || new Date(a.slotAt) - new Date(b.slotAt));
+  const chips = ['All', 'New', 'Preparing', 'Ready', 'Out for delivery', 'Completed', 'Cancelled'].map((name) => '<button type="button" class="chip' + (name === status ? ' active' : '') + '" data-act="cafe-filter" data-id="' + name + '" aria-pressed="' + (name === status) + '">' + name + ' <span class="count">' + counts[name] + '</span></button>').join('');
+  const cards = rows.map((order) => {
+    const where = order.fulfilment === 'delivery' ? 'Delivery · ' + order.area + ' · ' + order.spot : 'Pickup · Hello Chingu Café, Ore 15th Floor';
+    const drinks = (order.items || []).map((item) => {
+      const addons = (item.addons || []).map((addon) => addon.name).filter(Boolean).join(', ');
+      return item.qty + ' × ' + esc(item.name) + ' (' + esc(item.size) + ')' + (addons ? ' + ' + esc(addons) : '') + (item.note ? ' — ' + esc(item.note) : '');
+    }).join('<br>');
+    const actions = cafeNext(order).map((next) => '<button type="button" class="btn ' + (next === 'Cancelled' ? 'btn-danger' : 'btn-secondary') + '" data-act="cafe-next" data-id="' + esc(order.id) + '" data-status="' + esc(next) + '">' + esc(CAFE_STATUS_LABEL[next] || next) + '</button>').join('');
+    return '<div class="line"><div class="row"><b>' + esc(order.num) + ' · ' + money(order.total) + '</b><span class="count">' + esc(order.status) + '</span></div><small>' + esc(where) + '</small><small>' + esc(L.formatManila(order.slotAt)) + ' · ' + esc(order.customer) + (order.note ? ' · ' + esc(order.note) : '') + '</small><p>' + drinks + '</p>' + (order.deliveryFee ? '<small>Delivery ' + money(order.deliveryFee) + '</small>' : '') + '<div class="row-actions">' + (order.proof ? '<button type="button" class="btn btn-secondary" data-act="proof" data-id="' + esc(order.proof) + '">View screenshot</button>' : '') + actions + '</div></div>';
+  }).join('');
+  return '<div class="tools"><input data-filter="cafeQ" value="' + esc(ui.cafeQ || '') + '" placeholder="Search order, drink, or name" aria-label="Search coffee orders"><div class="chips" role="toolbar" aria-label="Coffee order status">' + chips + '</div></div><section class="panel">' + (cards || '<div class="empty-state"><b>No coffee orders</b><p class="muted">New orders land here as soon as someone pays.</p></div>') + '</section>';
+}
+function paintCafeMenu(info) {
+  const catName = (id) => (info.categories || []).find((row) => row.id === id)?.name || '';
+  const drinks = (info.items || []).map((item) => '<article class="panel"><div class="row"><div><b>' + esc(item.name) + '</b> ' + (item.starred ? '<span class="badge low" aria-label="Favourite">★</span>' : '') + (item.mustTry ? ' <span class="tag">Must try</span>' : '') + (item.available ? '' : ' <span class="badge out">Sold out</span>') + '<br><small>' + esc(catName(item.categoryId)) + ' · ' + esc(sizePrices(item)) + '</small></div></div><div class="row-actions"><button type="button" class="btn btn-secondary" data-act="cafe-edit-item" data-id="' + esc(item.id) + '">Edit</button><button type="button" class="btn btn-secondary" data-act="cafe-toggle-item" data-id="' + esc(item.id) + '">' + (item.available ? 'Mark sold out' : 'Mark available') + '</button><button type="button" class="btn btn-danger" data-act="cafe-delete-item" data-id="' + esc(item.id) + '">Remove</button></div></article>').join('');
+  const addons = (info.addons || []).map((addon) => '<div class="line"><div class="row"><b>' + esc(addon.name) + '</b><span>' + money(addon.price) + '</span></div><div class="row-actions"><button type="button" class="btn btn-secondary" data-act="cafe-edit-addon" data-id="' + esc(addon.id) + '">Edit</button><button type="button" class="btn btn-danger" data-act="cafe-delete-addon" data-id="' + esc(addon.id) + '">Remove</button></div></div>').join('');
+  const cats = (info.categories || []).map((row) => '<div class="line"><div class="row"><b>' + esc(row.name) + '</b><span class="row-actions"><button type="button" class="btn btn-secondary" data-act="cafe-edit-cat" data-id="' + esc(row.id) + '">Rename</button><button type="button" class="btn btn-danger" data-act="cafe-delete-cat" data-id="' + esc(row.id) + '">Remove</button></span></div></div>').join('');
+  return '<div class="tools"><button type="button" class="btn btn-primary" data-act="cafe-edit-item">Add drink</button><button type="button" class="btn btn-secondary" data-act="cafe-edit-cat">Add category</button><button type="button" class="btn btn-secondary" data-act="cafe-edit-addon">Add add-on</button></div><section class="panel"><h2>Menu</h2><div class="cafemenu">' + (drinks || '<p class="muted">No drinks yet.</p>') + '</div></section><section class="panel"><h2>Add-ons</h2>' + (addons || '<p class="muted">No add-ons yet.</p>') + '</section><section class="panel"><h2>Categories</h2>' + (cats || '<p class="muted">No categories yet.</p>') + '</section>';
+}
+function paintCafeHours(info) {
+  const settings = info.settings || {};
+  const hours = settings.hours || [];
+  const rows = CAFE_DAYS.map((day, i) => {
+    const row = hours[i] || { open: '08:00', close: '19:00', closed: false };
+    return '<div class="hourrow"><b>' + day + '</b><label class="checkline"><input type="checkbox" data-closed="' + i + '"' + (row.closed ? ' checked' : '') + '> Closed</label><label>Opens<input type="time" data-open="' + i + '" value="' + esc(row.open || '08:00') + '"></label><label>Closes<input type="time" data-close="' + i + '" value="' + esc(row.close || '19:00') + '"></label></div>';
+  }).join('');
+  const options = [5, 10, 15, 20, 30, 60].map((n) => '<option value="' + n + '"' + (Number(settings.slotMin) === n ? ' selected' : '') + '>' + n + ' min</option>').join('');
+  return '<section class="panel"><h2>Hours</h2><p class="muted">Customers can choose a slot today or tomorrow. Building delivery is ' + money(settings.deliveryFee || 0) + '.</p><label class="checkline"><input type="checkbox" id="cafe-on"' + (settings.accepting ? ' checked' : '') + '> Accepting coffee orders</label><div class="tools"><label class="field">Minimum lead time (minutes)<input id="cafe-lead" type="number" min="0" max="180" step="1" value="' + esc(settings.leadMin ?? 15) + '"></label><label class="field">Slot interval<select id="cafe-slotmin">' + options + '</select></label></div>' + rows + '<button type="button" class="btn btn-primary" data-act="cafe-save-hours">Save hours</button></section>';
+}
+function editCafeItem(id) {
+  const info = adminData.cafe;
+  const found = (info.items || []).find((row) => row.id === id);
+  const item = found || { id: crypto.randomUUID(), name: '', categoryId: (info.categories || [])[0]?.id || '', sizes: {}, available: true, starred: false, mustTry: false };
+  modal(found ? 'Edit drink' : 'New drink', '<form id="cafeitem"><label>Name<input id="ciname" maxlength="80" required value="' + esc(item.name || '') + '"></label><label>Category<select id="cicat">' + (info.categories || []).map((row) => '<option value="' + esc(row.id) + '">' + esc(row.name) + '</option>').join('') + '</select></label>' + CAFE_SIZES.map((size) => '<label>' + size + ' price (₱)<span class="hint">Leave blank if this size is not offered.</span><input id="cisize-' + size + '" type="number" min="0.01" step="0.01" value="' + (item.sizes && item.sizes[size] ? item.sizes[size] / 100 : '') + '"></label>').join('') + '<label class="checkline"><input type="checkbox" id="cistar"' + (item.starred ? ' checked' : '') + '> Starred favourite</label><label class="checkline"><input type="checkbox" id="cimust"' + (item.mustTry ? ' checked' : '') + '> Must try</label><label class="checkline"><input type="checkbox" id="ciavail"' + (item.available !== false ? ' checked' : '') + '> Available<span class="hint">Uncheck when it is sold out.</span></label><button class="btn btn-primary full">Save drink</button></form>', true);
+  if (item.categoryId && $('#cicat')) $('#cicat').value = item.categoryId;
+  $('#cafeitem').onsubmit = async (e) => {
+    e.preventDefault();
+    const button = e.target.querySelector('button');
+    button.disabled = true;
+    try {
+      const sizes = {};
+      for (const size of CAFE_SIZES) {
+        const raw = $('#cisize-' + size).value;
+        if (raw === '') continue;
+        const cents = Math.round(Number(raw) * 100);
+        if (!Number.isInteger(cents) || cents <= 0) throw Error('Check the ' + size + ' price');
+        sizes[size] = cents;
+      }
+      if (!Object.keys(sizes).length) throw Error('Enter a price for at least one size');
+      await api('/api/admin/cafe-item', { id: item.id, name: $('#ciname').value.trim(), categoryId: $('#cicat').value, sizes, starred: $('#cistar').checked, mustTry: $('#cimust').checked, available: $('#ciavail').checked });
+      dlg.close();
+      await reload();
+      msg('Drink saved');
+    } catch (err) { fail(err); button.disabled = false; }
+  };
+}
+function editCafeAddon(id) {
+  const addon = ((adminData.cafe || {}).addons || []).find((row) => row.id === id) || { id: crypto.randomUUID(), name: '', price: 0 };
+  const fresh = !((adminData.cafe || {}).addons || []).some((row) => row.id === addon.id);
+  modal(fresh ? 'New add-on' : 'Edit add-on', '<form id="cafeaddon"><label>Name<input id="caname" maxlength="40" required value="' + esc(addon.name || '') + '"></label><label>Price (₱)<input id="caprice" type="number" min="0" step="0.01" required value="' + (addon.price ? addon.price / 100 : '') + '"></label><button class="btn btn-primary full">Save add-on</button></form>');
+  $('#cafeaddon').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const price = Math.round(Number($('#caprice').value) * 100);
+      if (!Number.isInteger(price) || price < 0) throw Error('Check the add-on price');
+      await api('/api/admin/cafe-addon', { id: addon.id, name: $('#caname').value.trim(), price });
+      dlg.close();
+      await reload();
+      msg('Add-on saved');
+    } catch (err) { fail(err); }
+  };
+}
+function editCafeCategory(id) {
+  const row = ((adminData.cafe || {}).categories || []).find((item) => item.id === id) || { id: crypto.randomUUID(), name: '' };
+  const fresh = !((adminData.cafe || {}).categories || []).some((item) => item.id === row.id);
+  modal(fresh ? 'New category' : 'Rename category', '<form id="cafecat"><label>Name<input id="ccname" maxlength="40" required value="' + esc(row.name || '') + '"></label><button class="btn btn-primary full">Save category</button></form>');
+  $('#cafecat').onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/admin/cafe-category', { id: row.id, name: $('#ccname').value.trim() });
+      dlg.close();
+      await reload();
+      msg('Category saved');
+    } catch (err) { fail(err); }
+  };
+}
+async function cafeClick(act, id, b) {
+  if (act === 'cafe') { await openCafe(true); return true; }
+  if (act === 'cafe-back') { closeCafe(); return true; }
+  if (act === 'cafe-cat') { cafeCat = id; renderCafeFilters(); renderCafeGrid(); return true; }
+  if (act === 'cafe-open') {
+    cafeExpanded = cafeExpanded === id ? '' : id;
+    renderCafeGrid();
+    if (cafeExpanded) document.getElementById('drink-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    return true;
+  }
+  if (act === 'cafe-size') {
+    const card = b.closest('.drink');
+    if (!card) return true;
+    card.querySelectorAll('[data-act="cafe-size"]').forEach((btn) => { const on = btn === b; btn.classList.toggle('active', on); btn.setAttribute('aria-pressed', String(on)); });
+    updateDrinkPrice(card);
+    return true;
+  }
+  if (act === 'cafe-qty') {
+    const card = b.closest('.drink');
+    const span = card && card.querySelector('[data-qty]');
+    if (!span) return true;
+    span.textContent = String(Math.min(20, Math.max(1, Number(span.textContent) + Number(b.dataset.n))));
+    updateDrinkPrice(card);
+    return true;
+  }
+  if (act === 'cafe-add') {
+    const card = b.closest('.drink');
+    const item = (cafe.items || []).find((row) => row.id === card?.dataset.id);
+    if (!item || !item.available) return true;
+    const size = selectedSize(card);
+    const addons = selectedAddons(card);
+    const qty = Number(card.querySelector('[data-qty]')?.textContent || 1);
+    const note = card.querySelector('[data-note]')?.value.trim() || '';
+    if (!size) throw Error('Choose a size');
+    if (note.length > 80) throw Error('Keep the drink note under 80 characters');
+    const same = cafeCart.find((line) => line.itemId === item.id && line.size === size && line.note === note && line.addons.slice().sort().join() === addons.slice().sort().join());
+    if (same) same.qty = Math.min(20, same.qty + qty);
+    else {
+      if (cafeCart.length >= 30) throw Error('The cart is full');
+      cafeCart.push({ id: crypto.randomUUID(), itemId: item.id, size, addons: addons.slice(), qty, note });
+    }
+    saveCafeCart();
+    sessionStorage.removeItem('tapat-cafe-attempt');
+    sessionStorage.removeItem('tapat-cafe-sig');
+    cafeExpanded = '';
+    renderCafeGrid();
+    cafeBasket();
+    msg('Added ' + item.name);
+    return true;
+  }
+  if (act === 'cafe-line') {
+    const line = cafeCart.find((row) => row.id === id);
+    if (!line) return true;
+    line.qty += Number(b.dataset.n);
+    if (line.qty <= 0) cafeCart = cafeCart.filter((row) => row !== line);
+    saveCafeCart();
+    sessionStorage.removeItem('tapat-cafe-attempt');
+    sessionStorage.removeItem('tapat-cafe-sig');
+    cafeBasket();
+    return true;
+  }
+  if (act === 'cafe-checkout') { await openCafeCheckout(); return true; }
+  if (act === 'cafe-fulfil') { cafeFulfil = id === 'delivery' ? 'delivery' : 'pickup'; syncCafeCheckout(); return true; }
+  if (act === 'cafe-area') { cafeArea = id; syncCafeCheckout(); return true; }
+  if (act === 'cafe-tab') { saveUi({ cafeTab: id }); paint(); return true; }
+  if (act === 'cafe-filter') { saveUi({ cafeStatus: id }); paint(); return true; }
+  if (act === 'cafe-next') {
+    const status = b.dataset.status;
+    const run = async () => { await api('/api/admin/cafe-status', { id, status }); if (dlg.open) dlg.close(); await reload(); msg(status === 'Cancelled' ? 'Order cancelled' : 'Order updated'); };
+    if (status === 'Cancelled') confirmBox('Cancel this coffee order?', 'It stays in the list and drops out of café sales.', 'Cancel order', run);
+    else await run();
+    return true;
+  }
+  if (act === 'cafe-edit-item') { editCafeItem(id); return true; }
+  if (act === 'cafe-toggle-item') {
+    const item = (adminData.cafe.items || []).find((row) => row.id === id);
+    if (!item) return true;
+    await api('/api/admin/cafe-item', { id: item.id, name: item.name, categoryId: item.categoryId, sizes: item.sizes, starred: item.starred, mustTry: item.mustTry, available: !item.available });
+    await reload();
+    msg(item.available ? 'Marked sold out' : 'Back on the menu');
+    return true;
+  }
+  if (act === 'cafe-delete-item') {
+    const item = (adminData.cafe.items || []).find((row) => row.id === id);
+    confirmBox('Remove this drink?', '<b>' + esc(item?.name || 'This drink') + '</b> leaves the menu. Past orders keep what was ordered.', 'Remove', async () => { await api('/api/admin/cafe-item', { id, delete: true }); dlg.close(); await reload(); msg('Drink removed'); });
+    return true;
+  }
+  if (act === 'cafe-edit-addon') { editCafeAddon(id); return true; }
+  if (act === 'cafe-delete-addon') {
+    const addon = (adminData.cafe.addons || []).find((row) => row.id === id);
+    confirmBox('Remove this add-on?', '<b>' + esc(addon?.name || 'This add-on') + '</b> leaves the menu.', 'Remove', async () => { await api('/api/admin/cafe-addon', { id, delete: true }); dlg.close(); await reload(); msg('Add-on removed'); });
+    return true;
+  }
+  if (act === 'cafe-edit-cat') { editCafeCategory(id); return true; }
+  if (act === 'cafe-delete-cat') {
+    const row = (adminData.cafe.categories || []).find((item) => item.id === id);
+    confirmBox('Remove this category?', '<b>' + esc(row?.name || 'This category') + '</b> can be removed when it has no drinks.', 'Remove', async () => { await api('/api/admin/cafe-category', { id, delete: true }); dlg.close(); await reload(); msg('Category removed'); });
+    return true;
+  }
+  if (act === 'cafe-save-hours') {
+    const hours = CAFE_DAYS.map((_, i) => ({ open: ($(`[data-open="${i}"]`).value || '').slice(0, 5), close: ($(`[data-close="${i}"]`).value || '').slice(0, 5), closed: $(`[data-closed="${i}"]`).checked }));
+    await api('/api/admin/cafe-settings', { accepting: $('#cafe-on').checked, leadMin: Math.round(Number($('#cafe-lead').value)), slotMin: Math.round(Number($('#cafe-slotmin').value)), hours });
+    await reload();
+    msg('Café hours saved');
+    return true;
+  }
+  return false;
+}
+
+window.addEventListener('popstate', () => { if (!own) start().catch((e) => { main.textContent = e.message; }); });
 document.addEventListener('click', onClick);
+document.addEventListener('change', (e) => {
+  const input = e.target.closest && e.target.closest('.addonlist input');
+  if (!input) return;
+  const card = input.closest('.drink');
+  if (card) updateDrinkPrice(card);
+});
 start().catch((e) => { main.textContent = e.message; const b = document.createElement('button'); b.textContent = 'Retry'; b.onclick = () => location.reload(); main.append(' ', b); });

@@ -521,6 +521,42 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 }
 .storecard h2 { font-size: 28px; }
 .storecard.remembered { border: 2px solid var(--orange-deep); background: var(--orange-soft); }
+.cafecard {
+  display: flex;
+  width: 100%;
+  margin-top: 16px;
+  text-align: left;
+  align-items: center;
+  gap: 16px;
+  padding: 22px;
+  background:
+    radial-gradient(circle at 94% 40%, #ffd9a8 0 16%, transparent 42%),
+    var(--white);
+}
+.cafecard h2 { font-size: 28px; }
+.cafecard p { color: var(--muted); font-weight: 700; margin-top: 4px; }
+.cafecard .btn { margin-left: auto; pointer-events: none; flex: none; }
+.shophead { flex-wrap: wrap; align-items: center; }
+.coffeebtn { flex: none; }
+.drink .badges { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.drink.is-open { grid-column: 1 / -1; }
+.drink .customize { display: grid; gap: 8px; margin-top: 4px; }
+.addonlist { display: grid; gap: 2px; max-height: 220px; overflow: auto; padding-right: 4px; }
+.addonlist label { margin: 0; }
+.chipwrap { flex-wrap: wrap; overflow: visible; }
+.sizeseg { width: 100%; }
+.sizeseg .segbtn { flex: 1 1 auto; }
+.hourrow {
+  display: grid;
+  grid-template-columns: minmax(108px, 1.1fr) auto minmax(120px, 1fr) minmax(120px, 1fr);
+  gap: 8px;
+  align-items: end;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.hourrow b { margin: 0 0 8px; }
+.hourrow .checkline, .hourrow label { margin: 0; }
+.cafemenu { display: grid; gap: 10px; }
 .codepill {
   display: inline-flex;
   align-items: center;
@@ -603,6 +639,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 .receipt { width: 100%; border-radius: 12px; background: white; }
 
 dialog {
+  z-index: 40;
   color: inherit;
   padding: 20px;
   width: min(480px, 94vw);
@@ -787,6 +824,10 @@ th .sort[aria-sort="descending"]::after { content: " ↓"; color: var(--orange-d
 @keyframes shine { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+@media (min-width: 980px) {
+  .cafemenu { grid-template-columns: 1fr 1fr; }
+}
+
 @media (max-width: 980px) {
   .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -881,4 +922,11 @@ th .sort[aria-sort="descending"]::after { content: " ↓"; color: var(--orange-d
   .toast { bottom: 72px; }
   .ownerline .row { flex-direction: column; align-items: stretch; }
   .ownerline .btn, .team-add .btn { width: 100%; }
+  .cafecard { flex-direction: column; align-items: flex-start; }
+  .cafecard .btn { margin-left: 0; width: 100%; }
+  .coffeebtn { width: 100%; }
+  .hourrow { grid-template-columns: 1fr 1fr; }
+  .hourrow b, .hourrow .checkline { grid-column: 1 / -1; }
+  .cafemenu { grid-template-columns: 1fr; }
+  .drink { grid-column: 1 / -1; }
 }

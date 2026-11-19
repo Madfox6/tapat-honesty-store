@@ -4,6 +4,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import {
+  AREAS, CAFE_ADDONS, CAFE_CATEGORIES, CAFE_ITEMS, CAFE_NAME, CAFE_PLACE,
+  areaLabel, cafeSlots, defaultHours, hoursOk, lineTotal, nextCafeStatuses,
+  orderMoney, receiptWhen, sizePrice, sizesOk, SLOT_CHOICES, slotAllowed, todayLabel,
+} from '../supabase/functions/store/cafe.ts';
 
 const require = createRequire(import.meta.url);
 const L = require('../store-logic.js');
@@ -106,8 +111,116 @@ function admin() {
     ads, requests, expenses, subscribers, sends,
     teamReady: true,
     owners,
-    telegram: { token: false, salesChat: true, stocksChat: true },
+    telegram: { token: false, salesChat: true, stocksChat: true, coffeeChat: false },
+    cafe: cafeAdmin(),
   };
+}
+
+const cafeCategories = CAFE_CATEGORIES.map((row, i) => ({ id: row.id, name: row.name, seq: i + 1 }));
+const cafeItems = CAFE_ITEMS.map((row, i) => ({
+  id: row.id, categoryId: row.categoryId, name: row.name, sizes: { ...row.sizes },
+  available: true, starred: row.starred, mustTry: row.mustTry, seq: i + 1,
+}));
+const cafeAddons = CAFE_ADDONS.map((row, i) => ({ id: row.id, name: row.name, price: row.price, seq: i + 1 }));
+const cafeSettings = { accepting: true, leadMin: 15, slotMin: 15, deliveryFee: 2000, hours: defaultHours(), orderSeq: 3 };
+function cafeSnapshot(item, size, addonIds, qty, note) {
+  const unit = sizePrice(item.sizes, size);
+  const addons = addonIds.map((id) => cafeAddons.find((row) => row.id === id)).filter(Boolean);
+  const line = lineTotal(unit, addons.map((row) => row.price), qty);
+  return {
+    id: item.id, name: item.name, size, qty, unit, note: note || '',
+    addons: addons.map((row) => ({ id: row.id, name: row.name, price: row.price })),
+    line,
+  };
+}
+const cafeOrders = [
+  {
+    id: 'c1111111-1111-4111-8111-111111111111', num: 'CAF-0001', ts: hours(1),
+    items: [cafeSnapshot(cafeItems.find((row) => row.id === 'drink-spanish-latte'), 'Med', ['addon-oat'], 1, 'less sweet')],
+    subtotal: 17000, deliveryFee: 2000, total: 19000, fulfilment: 'delivery', area: 'Ore 20th Floor', spot: 'Desk 4B',
+    slotAt: new Date(Date.now() + 90 * 60 * 1000).toISOString(), customer: 'Ana Cruz', note: 'Call when you arrive',
+    bank: 'GCash', proof: '/file/proof-11111111-1111-4111-8111-111111111111', status: 'New',
+  },
+  {
+    id: 'c2222222-2222-4222-8222-222222222222', num: 'CAF-0002', ts: hours(2),
+    items: [cafeSnapshot(cafeItems.find((row) => row.id === 'drink-cappuccino'), 'Lrg', [], 1, '')],
+    subtotal: 16000, deliveryFee: 0, total: 16000, fulfilment: 'pickup', area: '', spot: '',
+    slotAt: new Date(Date.now() + 40 * 60 * 1000).toISOString(), customer: 'Juan', note: '',
+    bank: 'GCash', proof: '/file/proof-22222222-2222-4222-8222-222222222222', status: 'Preparing',
+  },
+  {
+    id: 'c3333333-3333-4333-8333-333333333333', num: 'CAF-0003', ts: hours(26),
+    items: [cafeSnapshot(cafeItems.find((row) => row.id === 'drink-matcha-latte'), 'Reg', [], 1, '')],
+    subtotal: 13000, deliveryFee: 0, total: 13000, fulfilment: 'pickup', area: '', spot: '',
+    slotAt: hours(25), customer: 'Mia', note: '', bank: 'GCash', proof: '', status: 'Completed',
+  },
+];
+function cafePublic() {
+  const now = new Date();
+  return {
+    ready: true, name: CAFE_NAME, place: CAFE_PLACE, accepting: cafeSettings.accepting,
+    deliveryFee: cafeSettings.deliveryFee, today: todayLabel(now, cafeSettings.hours),
+    categories: cafeCategories.map((row) => ({ id: row.id, name: row.name })),
+    items: cafeItems.map((row) => ({ ...row, sizes: { ...row.sizes } })),
+    addons: cafeAddons.map((row) => ({ id: row.id, name: row.name, price: row.price })),
+    slots: cafeSlots({ now, hours: cafeSettings.hours, leadMin: cafeSettings.leadMin, slotMin: cafeSettings.slotMin, accepting: cafeSettings.accepting }),
+    areas: AREAS, banks,
+  };
+}
+function cafeAdmin() {
+  return {
+    ready: true,
+    settings: { ...cafeSettings, hours: cafeSettings.hours.map((day) => ({ ...day })) },
+    categories: cafeCategories.map((row) => ({ ...row })),
+    items: cafeItems.map((row) => ({ ...row, sizes: { ...row.sizes } })),
+    addons: cafeAddons.map((row) => ({ ...row })),
+    orders: cafeOrders.map((row) => ({ ...row, items: row.items.map((item) => ({ ...item, addons: item.addons.map((addon) => ({ ...addon })) })) })),
+  };
+}
+function cafeOrder(body) {
+  const known = cafeOrders.find((row) => row.id === body.id);
+  if (known) return { status: 200, body: { ...known, slot: known.slotAt, store: CAFE_NAME, whenLine: receiptWhen(known.fulfilment, new Date(known.slotAt), known.area, known.spot), existing: true } };
+  if (!cafeSettings.accepting) return { status: 409, body: { error: 'The café is not taking orders right now' } };
+  const now = new Date();
+  if (!slotAllowed(body.slot, { now, hours: cafeSettings.hours, leadMin: cafeSettings.leadMin, slotMin: cafeSettings.slotMin, accepting: true })) {
+    return { status: 409, body: { error: 'That time just closed. Pick another.' } };
+  }
+  const fulfilment = body.fulfilment === 'delivery' || body.fulfilment === 'pickup' ? body.fulfilment : '';
+  if (!fulfilment) return { status: 400, body: { error: 'Choose pickup or delivery' } };
+  const customer = String(body.customer || '').trim();
+  if (!customer || customer.length > 80) return { status: 400, body: { error: 'Add your name so the café can find you' } };
+  const recent = cafeOrders.filter((row) => row.customer.toLowerCase() === customer.toLowerCase() && Date.now() - new Date(row.ts).getTime() < 3600000).length;
+  if (recent >= 8) return { status: 429, body: { error: 'Too many coffee orders under that name. Wait a bit and try again.' } };
+  let area = '';
+  let spot = '';
+  if (fulfilment === 'delivery') {
+    area = body.areaId === 'other' ? String(body.areaText || '').trim() : areaLabel(String(body.areaId || ''), '');
+    spot = String(body.spot || '').trim();
+    if (!area) return { status: 400, body: { error: 'Choose where to deliver' } };
+    if (!spot) return { status: 400, body: { error: 'Tell us the desk or area' } };
+  }
+  const lines = [];
+  for (const raw of body.items || []) {
+    const item = cafeItems.find((row) => row.id === raw.id && row.available);
+    const unit = item && sizePrice(item.sizes, raw.size);
+    const addons = (raw.addons || []).map((id) => cafeAddons.find((row) => row.id === id));
+    if (!item || !unit || addons.some((row) => !row)) return { status: 409, body: { error: 'That drink changed. Refresh the menu.' } };
+    const priced = lineTotal(unit, addons.map((row) => row.price), raw.qty);
+    if (!priced) return { status: 400, body: { error: 'Check the quantity' } };
+    lines.push(cafeSnapshot(item, raw.size, raw.addons, raw.qty, String(raw.note || '').trim()));
+  }
+  const money = orderMoney(lines.map((row) => row.line), cafeSettings.deliveryFee, fulfilment);
+  if (!money || !lines.length) return { status: 400, body: { error: 'Check your drinks' } };
+  if (!banks[body.bank] || !String(body.proof || '').startsWith('/file/proof-')) return { status: 400, body: { error: 'Upload your payment screenshot' } };
+  cafeSettings.orderSeq += 1;
+  const saved = {
+    id: body.id, num: L.formatOrderNo('CAF', cafeSettings.orderSeq), ts: new Date().toISOString(),
+    items: lines, subtotal: money.subtotal, deliveryFee: money.deliveryFee, total: money.total,
+    fulfilment, area, spot, slotAt: new Date(body.slot).toISOString(), customer,
+    note: String(body.note || '').trim(), bank: body.bank, proof: body.proof, status: 'New',
+  };
+  cafeOrders.unshift(saved);
+  return { status: 200, body: { ...saved, slot: saved.slotAt, store: CAFE_NAME, whenLine: receiptWhen(fulfilment, new Date(saved.slotAt), area, spot) } };
 }
 
 function readBody(req) {
@@ -128,6 +241,69 @@ export async function handle(req, res) {
     }
     const send = (code, data) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
     if (url.pathname === '/api/catalog') return send(200, catalog((url.searchParams.get('store') || '').toUpperCase()));
+    if (url.pathname === '/api/cafe') return send(200, cafePublic());
+    if (url.pathname === '/api/cafe/order') {
+      const placed = cafeOrder(body);
+      return send(placed.status, placed.body);
+    }
+    if (url.pathname === '/api/admin/cafe-settings') {
+      const hours = Array.isArray(body.hours) ? body.hours.map((day) => ({ open: String(day.open || '').slice(0, 5), close: String(day.close || '').slice(0, 5), closed: !!day.closed })) : [];
+      if (!hoursOk(hours) || !SLOT_CHOICES.includes(body.slotMin) || !Number.isInteger(body.leadMin) || body.leadMin < 0 || body.leadMin > 180) return send(400, { error: 'Check the café hours' });
+      cafeSettings.accepting = !!body.accepting;
+      cafeSettings.leadMin = body.leadMin;
+      cafeSettings.slotMin = body.slotMin;
+      cafeSettings.hours = hours;
+      return send(200, { ok: true });
+    }
+    if (url.pathname === '/api/admin/cafe-category') {
+      const id = String(body.id || crypto.randomUUID()).toLowerCase();
+      if (body.delete) {
+        if (cafeItems.some((row) => row.categoryId === id)) return send(400, { error: 'Move the drinks out of this category first' });
+        const index = cafeCategories.findIndex((row) => row.id === id);
+        if (index >= 0) cafeCategories.splice(index, 1);
+        return send(200, { ok: true });
+      }
+      const name = String(body.name || '').trim();
+      if (!name || name.length > 40) return send(400, { error: 'Check the category name' });
+      const row = cafeCategories.find((item) => item.id === id);
+      if (row) row.name = name;
+      else cafeCategories.push({ id, name, seq: cafeCategories.length + 1 });
+      return send(200, { ok: true, id });
+    }
+    if (url.pathname === '/api/admin/cafe-item') {
+      const id = String(body.id || crypto.randomUUID()).toLowerCase();
+      if (body.delete) {
+        const index = cafeItems.findIndex((row) => row.id === id);
+        if (index >= 0) cafeItems.splice(index, 1);
+        return send(200, { ok: true });
+      }
+      if (!sizesOk(body.sizes) || !String(body.name || '').trim() || !cafeCategories.some((row) => row.id === body.categoryId)) return send(400, { error: 'Check the drink name' });
+      const row = cafeItems.find((item) => item.id === id) || { id, seq: cafeItems.length + 1 };
+      Object.assign(row, { name: String(body.name).trim(), categoryId: body.categoryId, sizes: body.sizes, available: body.available !== false && body.available !== 0, starred: !!body.starred, mustTry: !!body.mustTry });
+      if (!cafeItems.includes(row)) cafeItems.push(row);
+      return send(200, { ok: true, id });
+    }
+    if (url.pathname === '/api/admin/cafe-addon') {
+      const id = String(body.id || crypto.randomUUID()).toLowerCase();
+      if (body.delete) {
+        const index = cafeAddons.findIndex((row) => row.id === id);
+        if (index >= 0) cafeAddons.splice(index, 1);
+        return send(200, { ok: true });
+      }
+      const name = String(body.name || '').trim();
+      if (!name || !Number.isInteger(body.price) || body.price < 0) return send(400, { error: 'Check the add-on' });
+      const row = cafeAddons.find((item) => item.id === id) || { id, seq: cafeAddons.length + 1 };
+      Object.assign(row, { name, price: body.price });
+      if (!cafeAddons.includes(row)) cafeAddons.push(row);
+      return send(200, { ok: true, id });
+    }
+    if (url.pathname === '/api/admin/cafe-status') {
+      const row = cafeOrders.find((order) => order.id === body.id);
+      if (!row) return send(404, { error: 'Unknown order' });
+      if (!nextCafeStatuses(row.fulfilment, row.status).includes(body.status)) return send(400, { error: 'That status is not the next step' });
+      row.status = body.status;
+      return send(200, { ok: true });
+    }
     if (url.pathname === '/api/admin/data') return send(200, admin());
     if (url.pathname === '/api/admin/telegram') {
       if (req.method === 'GET') return send(200, admin().telegram);
