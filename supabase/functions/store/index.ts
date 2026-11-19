@@ -1,6 +1,7 @@
 // Chingu Honesty Store API. The browser only ever sends the publishable key.
 // This function uses the service role, and Postgres RLS stays on with no policies.
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { movementMessage, plainNote, RESTOCK_AT, saleCaption, stockMessages, type SaleItem, type StockLevel, type StockMove } from './telegram.ts';
 
 const SETUP = '124ed15d7d5eb49b7967b7024a96f520eabf7be15629739e25272291129fbf0f';
 const BUCKET = 'store-files';
@@ -170,6 +171,161 @@ function emailDocument(opts: { subject: string; message: string; banner?: string
   const banner = opts.banner ? `<p><img alt="" src="${escHtml(opts.banner)}" style="max-width:100%;border-radius:12px"></p>` : '';
   const unsub = opts.unsubUrl ? `<p style="font-size:12px"><a href="${escHtml(opts.unsubUrl)}">Unsubscribe</a></p>` : '';
   return `<div style="font-family:Nunito,Arial,sans-serif;background:#FFF8EF;padding:24px;color:#2B2420"><div style="max-width:560px;margin:auto;background:#fff;border:2px solid #F0D9BE;border-radius:18px;padding:24px"><p style="letter-spacing:2px;text-transform:uppercase;color:#C44E12;font-size:12px;font-weight:800">Chingu Honesty Store</p><h1 style="font-size:28px;margin:8px 0">${escHtml(opts.subject)}</h1><p style="font-size:16px;line-height:1.5">${escHtml(opts.message).replace(/\n/g, '<br>')}</p>${banner}${items}<p style="font-size:12px;color:#7A5A3C">You are receiving this because you shopped at Chingu Honesty Store${opts.storeName ? ' (' + escHtml(opts.storeName) + ')' : ''}.</p>${unsub}</div></div>`;
+}
+
+const TELEGRAM_MS = 15000;
+const SALES_CHAT = 'telegram_sales_chat_id';
+const STOCKS_CHAT = 'telegram_stocks_chat_id';
+
+function botToken() {
+  return (Deno.env.get('TELEGRAM_BOT_TOKEN') || '').trim();
+}
+
+function defer(task: Promise<unknown>) {
+  const run = task.catch(() => { console.warn('telegram notification failed'); });
+  try {
+    const waitUntil = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime?.waitUntil;
+    if (typeof waitUntil === 'function') waitUntil(run);
+    else void run;
+  } catch {
+    void run;
+  }
+}
+
+function usableChat(value: unknown) {
+  const id = typeof value === 'string' ? value.trim() : '';
+  if (!id || id.length > 64 || /[\u0000-\u001f\s]/.test(id)) return '';
+  return id;
+}
+
+async function chatId(k: string) {
+  const { data, error } = await db.from('app_secrets').select('v').eq('k', k).maybeSingle();
+  if (error) {
+    console.warn('telegram skipped: chat id unavailable', error.code || '');
+    return '';
+  }
+  return usableChat(data?.v);
+}
+
+async function telegramFlags() {
+  const token = botToken().length > 0;
+  const { data, error } = await db.from('app_secrets').select('k,v').in('k', [SALES_CHAT, STOCKS_CHAT]);
+  if (error) {
+    if (!missingRelation(error)) console.warn('telegram status unavailable', error.code || '');
+    return { token, salesChat: false, stocksChat: false };
+  }
+  const on = (k: string) => (data || []).some((row) => row.k === k && !!usableChat(row.v));
+  return { token, salesChat: on(SALES_CHAT), stocksChat: on(STOCKS_CHAT) };
+}
+
+async function telegramCall(method: string, body: FormData | Record<string, unknown>) {
+  const token = botToken();
+  if (!token) return { ok: false, skipped: true };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TELEGRAM_MS);
+  try {
+    const init: RequestInit = { method: 'POST', signal: ctrl.signal };
+    if (body instanceof FormData) init.body = body;
+    else {
+      init.headers = { 'Content-Type': 'application/json' };
+      init.body = JSON.stringify(body);
+    }
+    const res = await fetch('https://api.telegram.org/bot' + token + '/' + method, init);
+    const ok = res.ok;
+    const status = res.status;
+    try { await res.body?.cancel(); } catch { /* the status is what matters */ }
+    if (!ok) {
+      console.warn('telegram', method, 'rejected', status);
+      return { ok: false, skipped: false };
+    }
+    return { ok: true, skipped: false };
+  } catch (err) {
+    const aborted = err instanceof Error && err.name === 'AbortError';
+    console.warn('telegram', method, aborted ? 'timed out' : 'failed');
+    return { ok: false, skipped: false };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function sendTelegramMessage(chat: string, text: string) {
+  if (!chat || !text) return { ok: false, skipped: true };
+  return telegramCall('sendMessage', { chat_id: chat, text: text.slice(0, 4000), parse_mode: 'HTML', disable_web_page_preview: true });
+}
+
+async function sendTelegramPhoto(chat: string, bytes: Uint8Array, mime: string, caption: string) {
+  const form = new FormData();
+  form.append('chat_id', chat);
+  form.append('parse_mode', 'HTML');
+  form.append('caption', caption.slice(0, 1024));
+  const ext = mime.includes('png') ? 'png' : 'jpg';
+  form.append('photo', new Blob([bytes], { type: mime || 'image/jpeg' }), 'payment.' + ext);
+  return telegramCall('sendPhoto', form);
+}
+
+async function proofBytes(proof: string) {
+  if (!fileProof(proof)) return null;
+  const { data, error } = await db.storage.from(BUCKET).download(proof.slice(6));
+  if (error || !data) {
+    console.warn('telegram receipt image unavailable');
+    return null;
+  }
+  const bytes = new Uint8Array(await data.arrayBuffer());
+  if (!bytes.length) return null;
+  return { bytes, mime: data.type || 'image/jpeg' };
+}
+
+async function announceOrder(info: { num: string; storeName: string; at: Date; total: number; customer: string; note: string; proof: string; items: SaleItem[]; levels: StockLevel[] }) {
+  if (!botToken()) {
+    console.warn('telegram skipped: TELEGRAM_BOT_TOKEN is not set');
+    return;
+  }
+  const sales = await chatId(SALES_CHAT);
+  if (!sales) console.warn('telegram skipped: sales chat is not configured');
+  else {
+    const caption = saleCaption(info);
+    let sent = false;
+    if (info.proof) {
+      const file = await proofBytes(info.proof);
+      if (file) sent = (await sendTelegramPhoto(sales, file.bytes, file.mime, caption)).ok;
+    }
+    if (!sent) await sendTelegramMessage(sales, caption);
+  }
+  const alerts = stockMessages(info.storeName, info.levels, RESTOCK_AT);
+  if (!alerts.low && !alerts.out) return;
+  const stocks = await chatId(STOCKS_CHAT);
+  if (!stocks) {
+    console.warn('telegram skipped: stocks chat is not configured');
+    return;
+  }
+  if (alerts.low) await sendTelegramMessage(stocks, alerts.low);
+  if (alerts.out) await sendTelegramMessage(stocks, alerts.out);
+}
+
+async function announceMovement(op: 'restock' | 'receive', storeId: string, productId: string, qty: number, shelf?: number, warehouse?: number) {
+  if (!botToken()) {
+    console.warn('telegram skipped: TELEGRAM_BOT_TOKEN is not set');
+    return;
+  }
+  const stocks = await chatId(STOCKS_CHAT);
+  if (!stocks) {
+    console.warn('telegram skipped: stocks chat is not configured');
+    return;
+  }
+  const [{ data: store }, { data: product }] = await Promise.all([
+    db.from('stores').select('name').eq('id', storeId).maybeSingle(),
+    db.from('products').select('name').eq('id', productId).maybeSingle(),
+  ]);
+  let nextShelf = shelf;
+  let nextWh = warehouse;
+  if (typeof nextShelf !== 'number' || typeof nextWh !== 'number') {
+    const { data: row } = await db.from('stock').select('shelf,warehouse').eq('store_id', storeId).eq('product_id', productId).maybeSingle();
+    nextShelf = row?.shelf ?? 0;
+    nextWh = row?.warehouse ?? 0;
+  }
+  const line: StockMove = { branch: store?.name || storeId, name: product?.name || 'Product', qty, shelf: nextShelf, warehouse: nextWh };
+  const text = movementMessage(op, [line]);
+  if (text) await sendTelegramMessage(stocks, text);
 }
 
 async function sendResend(messages: { to: string; subject: string; html: string; unsub?: string }[]) {
@@ -369,6 +525,7 @@ Deno.serve(async (req) => {
         expenses: (expenses.data || []).map((row) => ({ id: row.id, storeId: row.store_id, amount: row.amount, note: row.note, category: row.category, ts: row.ts })),
         subscribers: subs.data?.map((row) => ({ id: row.id, email: row.email, storeId: row.store_id, active: row.active, ts: row.ts })) || [],
         sends: (sends.data || []).map((row) => ({ id: row.id, ts: row.ts, storeId: row.store_id, subject: row.subject, template: row.template, recipients: row.recipients, test: row.test })),
+        telegram: await telegramFlags(),
         teamReady: !ownersMissing,
         owners: (ownersMissing && admin && who ? [{ user_id: who, email: whoEmail || 'owner', added_at: null }] : owners).map((row) => ({
           userId: row.user_id,
@@ -464,12 +621,16 @@ Deno.serve(async (req) => {
       need(body.op === 'restock' || body.op === 'receive' || body.op === 'set', 'Check the stock move');
       const qty = body.op === 'set' ? null : body.qty;
       if (body.op !== 'set') need(typeof qty === 'number' && Number.isSafeInteger(qty) && qty > 0 && qty < 1000000, 'Check the quantity');
-      const { error } = await db.rpc('adjust_stock', {
+      const { data: moved, error } = await db.rpc('adjust_stock', {
         p_store: store, p_product: body.productId, p_op: body.op, p_qty: qty,
         p_shelf: body.shelf ?? null, p_warehouse: body.warehouse ?? null,
         p_oshelf: body.originalShelf ?? null, p_owarehouse: body.originalWarehouse ?? null,
       });
       if (error) throw new HttpError(body.op === 'restock' ? 'Not enough in the warehouse' : 'Stock changed. Refresh and retry', 409);
+      if (body.op === 'restock' || body.op === 'receive') {
+        const levels = (moved || {}) as { shelf?: number; warehouse?: number };
+        defer(announceMovement(body.op, store, String(body.productId), qty as number, levels.shelf, levels.warehouse));
+      }
       return json({ ok: true });
     }
 
@@ -654,6 +815,29 @@ Deno.serve(async (req) => {
       return json({ ok: true, sent: recipients.length });
     }
 
+    if (path === '/api/admin/telegram') {
+      if (req.method === 'GET') return json(await telegramFlags());
+      need(req.method === 'POST', 'Invalid request', 405);
+      const flags = await telegramFlags();
+      need(flags.token, 'The bot token is not set', 503);
+      need(flags.salesChat || flags.stocksChat, 'The chat ids are not set', 503);
+      const text = '<b>Chingu Honesty Store</b>\nThis is a test message. Telegram notifications are connected.';
+      const sent: string[] = [];
+      if (flags.salesChat) {
+        const id = await chatId(SALES_CHAT);
+        const result = await sendTelegramMessage(id, text);
+        need(result.ok, 'The sales group did not accept the test message', 502);
+        sent.push('sales');
+      }
+      if (flags.stocksChat) {
+        const id = await chatId(STOCKS_CHAT);
+        const result = await sendTelegramMessage(id, text);
+        need(result.ok, 'The stocks group did not accept the test message', 502);
+        sent.push('stocks');
+      }
+      return json({ ok: true, token: flags.token, salesChat: flags.salesChat, stocksChat: flags.stocksChat, sent });
+    }
+
     if (path === '/api/admin/bank') {
       need(req.method === 'POST', 'Invalid request', 405);
       const { bank, file } = await readJson(req);
@@ -709,7 +893,7 @@ Deno.serve(async (req) => {
       const ids = a.items.map((i: { id?: string }) => String(i.id));
       const { data: prods, error: ep } = await db.from('products').select('id,name,price,sale_price,sale_pct,sale_start,sale_end').in('id', ids).eq('active', 1);
       if (ep) throw ep;
-      const { data: shelves, error: ehs } = await db.from('stock').select('product_id,shelf').eq('store_id', store).in('product_id', ids);
+      const { data: shelves, error: ehs } = await db.from('stock').select('product_id,shelf,warehouse').eq('store_id', store).in('product_id', ids);
       if (ehs) throw ehs;
       let total = 0;
       const now = new Date();
@@ -742,6 +926,25 @@ Deno.serve(async (req) => {
         const { data: again } = await db.from('orders').select('id,num,total').eq('id', a.id).maybeSingle();
         if (!again) throw new HttpError('Price or stock changed. Refresh and retry', 409);
         return json({ id: again.id, num: again.num, total: again.total });
+      }
+      if (!placed?.existing) {
+        const lines = a.items.map((i: { id: string; qty: number; price: number }) => {
+          const p = prods?.find((x) => x.id === i.id);
+          const row = shelves?.find((x) => x.product_id === i.id);
+          const before = row?.shelf ?? i.qty;
+          return { name: p?.name || 'Item', qty: i.qty, price: i.price, before, after: before - i.qty, warehouse: row?.warehouse ?? 0 };
+        });
+        defer(announceOrder({
+          num: String(placed.num || ''),
+          storeName: st.name,
+          at: now,
+          total,
+          customer: plainNote(a.name, 80),
+          note: plainNote(a.note, 200),
+          proof: a.cash < total && fileProof(a.proof) ? String(a.proof) : '',
+          items: lines.map((row) => ({ name: row.name, qty: row.qty, price: row.price })),
+          levels: lines.map((row) => ({ name: row.name, before: row.before, after: row.after, warehouse: row.warehouse })),
+        }));
       }
       let emailSent = false;
       let emailNote = '';
