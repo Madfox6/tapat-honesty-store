@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="is-owner">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#F47B3A">
@@ -14,9 +14,11 @@
   <a class="brand" href="./"><img src="logo.png" alt="Chingu Honesty Store"></a>
   <nav><a id="nav"></a></nav>
 </header>
-<main id="main">Loading store…</main>
+<main id="main" aria-busy="true">
+  <div class="skeleton-grid" aria-hidden="true"><div class="sk sk-hero"></div><div class="sk-row"><div class="sk sk-card"></div><div class="sk sk-card"></div></div></div>
+</main>
 <dialog id="dlg"></dialog>
-<div id="toast" hidden role="status"></div>
+<div id="toast" class="toast" hidden role="status" aria-live="polite"></div>
 <script src="config.js"></script>
 <script src="store-logic.js"></script>
 <script src="vendor/supabase.js"></script>
