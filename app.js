@@ -21,8 +21,8 @@ const preview = demo ? (new URLSearchParams(location.search).get('preview') || '
 })();
 const sb = own && !demo && window.supabase ? window.supabase.createClient(C.SUPABASE_URL, C.PUBLISHABLE_KEY) : null;
 if (sb) sb.auth.onAuthStateChange((event) => { if (event === 'PASSWORD_RECOVERY') sessionStorage.setItem('tapat-set-password', 'recovery'); });
-const TABS = ['Dashboard', 'Sales', 'Inventory', 'Requests', 'Ads', 'Expenses', 'Email', 'Payment QRs', 'Store QR', 'Team'];
-const HASH = { dashboard: 'Dashboard', sales: 'Sales', inventory: 'Inventory', requests: 'Requests', ads: 'Ads', expenses: 'Expenses', email: 'Email', qrs: 'Payment QRs', qr: 'Store QR', team: 'Team' };
+const TABS = ['Dashboard', 'Sales', 'Inventory', 'Requests', 'Ads', 'Expenses', 'Email', 'Payment QRs', 'Store QR', 'Team', 'Settings'];
+const HASH = { dashboard: 'Dashboard', sales: 'Sales', inventory: 'Inventory', requests: 'Requests', ads: 'Ads', expenses: 'Expenses', email: 'Email', qrs: 'Payment QRs', qr: 'Store QR', team: 'Team', settings: 'Settings' };
 const UIKEY = 'tapat-owner-ui';
 
 let ui = {};
@@ -487,7 +487,7 @@ async function owner() {
 }
 
 const BOTTOM = ['Dashboard', 'Sales', 'Inventory', 'Ads'];
-const MORE = ['Requests', 'Expenses', 'Email', 'Payment QRs', 'Store QR', 'Team'];
+const MORE = ['Requests', 'Expenses', 'Email', 'Payment QRs', 'Store QR', 'Team', 'Settings'];
 function goTab(name) { tab = name; saveUi({ tab }); const sheet = $('#moresheet'); if (sheet) sheet.hidden = true; paint(); }
 function shell() {
   const stores = ownerStores();
@@ -679,6 +679,14 @@ function paintTeam() {
     (rows || '<div class="empty-state"><b>No owners yet</b></div>') + '</section>';
 }
 
+function paintSettings() {
+  const t = adminData.telegram || { token: false, salesChat: false, stocksChat: false };
+  const row = (label, on) => '<div class="line"><div class="row"><b>' + esc(label) + '</b><span class="badge ' + (on ? 'ok' : 'out') + '">' + (on ? 'Configured' : 'Not set') + '</span></div></div>';
+  return '<section class="panel"><h2>Telegram</h2><p>Sales go to the sales group with the payment screenshot. Low stock, empty shelves, and restocks go to the stocks group.</p>' +
+    row('Bot token', !!t.token) + row('Sales chat', !!t.salesChat) + row('Stocks chat', !!t.stocksChat) +
+    '<button type="button" class="btn btn-primary" data-act="telegram-test">Send test message</button><p class="hint">This page only shows whether each one is set.</p></section>';
+}
+
 function paintQr() {
   const base = C.SITE_URL || location.href.replace(/[?#].*$/, '').replace(/(owner(\.html)?|index\.html)$/, '');
   let svg = '';
@@ -690,7 +698,7 @@ function paint() {
   const area = $('#area');
   if (!area) return;
   const focus = document.activeElement && area.contains(document.activeElement) ? document.activeElement.dataset.filter : '';
-  const views = { Dashboard: paintDashboard, Sales: paintSales, Inventory: paintInventory, Requests: paintRequests, Ads: paintAds, Expenses: paintExpenses, Email: paintEmail, 'Payment QRs': paintBanks, 'Store QR': paintQr, Team: paintTeam };
+  const views = { Dashboard: paintDashboard, Sales: paintSales, Inventory: paintInventory, Requests: paintRequests, Ads: paintAds, Expenses: paintExpenses, Email: paintEmail, 'Payment QRs': paintBanks, 'Store QR': paintQr, Team: paintTeam, Settings: paintSettings };
   area.innerHTML = (views[tab] || paintDashboard)();
   if (focus) { const el = area.querySelector('[data-filter="' + focus + '"]'); if (el) { el.focus(); const n = el.value.length; if (el.setSelectionRange) el.setSelectionRange(n, n); } }
   area.querySelectorAll('[data-filter]').forEach((el) => el.oninput = () => { saveUi({ [el.dataset.filter]: el.value }); queuePaint(); });
@@ -912,6 +920,15 @@ async function onClick(e) {
     if (act === 'expense-add') { const amount = Math.round(Number($('#expamount').value) * 100); await api('/api/admin/expense', { amount, note: $('#expnote').value, category: $('#expcat').value, storeId: $('#expstore').value, ts: $('#expdate').value ? fromManilaInput($('#expdate').value + 'T00:00') : new Date().toISOString() }); await reload(); msg('Expense added'); return; }
     if (act === 'expense-del') { confirmBox('Delete this expense?', 'Net profit will no longer subtract it.', 'Delete', async () => { await api('/api/admin/expense', { id, delete: true }); dlg.close(); await reload(); msg('Expense deleted'); }); return; }
     if (act === 'bulk-sale' || act === 'bulk-clear' || act === 'bulk-show' || act === 'bulk-hide') { await bulk(act); return; }
+    if (act === 'telegram-test') {
+      b.disabled = true;
+      try {
+        const r = await api('/api/admin/telegram', {});
+        const where = (r.sent || []).map((name) => name === 'sales' ? 'sales group' : 'stocks group');
+        msg(where.length ? 'Test message sent to the ' + where.join(' and the ') : 'Test message sent');
+      } finally { if (b.isConnected) b.disabled = false; }
+      return;
+    }
     if (act === 'preview' || act === 'send-test' || act === 'send') { await sendEmail(act); }
   } catch (err) { fail(err); }
 }

@@ -14,7 +14,7 @@ This repository is the **static frontend**, served by GitHub Pages. The backend 
 ## Files
 
 - `index.html` – customer storefront (store picker, shelf stock, ads, requests, receipt)
-- `owner.html` – owner dashboard (sales, inventory, requests, ads, expenses, email, payment QRs, entrance QR, team)
+- `owner.html` – owner dashboard (sales, inventory, requests, ads, expenses, email, payment QRs, entrance QR, team, settings)
 - `app.js`, `store-logic.js`, `styles.css` – shared app code and styles
 - `config.js` – public settings: function URL, Supabase URL, **publishable** key, optional `SITE_URL`. Never put a secret / service-role key here.
 - `photos/` – the 8 sample product photos
@@ -62,7 +62,7 @@ The live API only accepts the GitHub Pages origin, so localhost needs the demo s
     # storefront http://localhost:8765/?demo=1
     # owner     http://localhost:8765/owner.html?demo=1
 
-`?demo=1` is ignored on the published site. Calculations in `store-logic.js` can be checked with `node --test test/store-logic.test.mjs`.
+`?demo=1` is ignored on the published site. Calculations in `store-logic.js` can be checked with `node --test test/store-logic.test.mjs`. Caption and stock-alert copy is checked with `node --test test/telegram.test.mjs`.
 
 ## Apply a backend change
 
@@ -70,5 +70,7 @@ Merging to `main` publishes the site. Apply database and function changes before
 
 1. Run `supabase/migrations/20261119120000_multi_store.sql` once in the Supabase SQL editor, if it is not already applied.
 2. Run `supabase/migrations/20261119150000_store_owners.sql` once. It copies the current `config` owner into `store_owners`.
-3. Deploy the `store` edge function from `supabase/functions/store/index.ts`.
-4. Optional email: set function secrets `RESEND_API_KEY` and `EMAIL_FROM`. Until both are set, the Email tab says email is not configured and checkout still completes. Invites and password resets use Supabase Auth email, not Resend.
+3. Run `supabase/migrations/20261119180000_app_secrets.sql` once. It creates `app_secrets` if needed and does not insert chat ids.
+4. Deploy the `store` edge function from `supabase/functions/store/index.ts`.
+5. Set the function secret `TELEGRAM_BOT_TOKEN`. Sales and stock chat ids stay in `app_secrets` (`telegram_sales_chat_id`, `telegram_stocks_chat_id`). Until the token is set, orders and stock moves still complete and Telegram sends are skipped. Settings shows whether the token and each chat id are set, never the values.
+6. Optional email: set function secrets `RESEND_API_KEY` and `EMAIL_FROM`. Until both are set, the Email tab says email is not configured and checkout still completes. Invites and password resets use Supabase Auth email, not Resend.

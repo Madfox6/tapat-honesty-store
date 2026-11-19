@@ -106,6 +106,7 @@ function admin() {
     ads, requests, expenses, subscribers, sends,
     teamReady: true,
     owners,
+    telegram: { token: false, salesChat: true, stocksChat: true },
   };
 }
 
@@ -128,6 +129,10 @@ export async function handle(req, res) {
     const send = (code, data) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
     if (url.pathname === '/api/catalog') return send(200, catalog((url.searchParams.get('store') || '').toUpperCase()));
     if (url.pathname === '/api/admin/data') return send(200, admin());
+    if (url.pathname === '/api/admin/telegram') {
+      if (req.method === 'GET') return send(200, admin().telegram);
+      return send(503, { error: 'The bot token is not set' });
+    }
     if (url.pathname === '/api/admin/owner') {
       if (body.remove) {
         if (body.remove === '11111111-1111-4111-8111-111111111111') return send(400, { error: 'You cannot remove your own access' });
