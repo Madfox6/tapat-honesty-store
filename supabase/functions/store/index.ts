@@ -1,6 +1,7 @@
 // Chingu Honesty Store API. The browser only ever sends the publishable key.
 // This function uses the service role, and Postgres RLS stays on with no policies.
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { areaLabel, AREAS, cafeSlots, CAFE_NAME, CAFE_PLACE, coffeeCaption, defaultHours, hoursOk, nextCafeStatuses, receiptWhen, sizePrice, sizesOk, SLOT_CHOICES, slotAllowed, todayLabel, type CoffeeLine, type DayHours } from './cafe.ts';
 import { movementMessage, plainNote, RESTOCK_AT, saleCaption, stockMessages, type SaleItem, type StockLevel, type StockMove } from './telegram.ts';
 
 const SETUP = '124ed15d7d5eb49b7967b7024a96f520eabf7be15629739e25272291129fbf0f';
@@ -176,6 +177,8 @@ function emailDocument(opts: { subject: string; message: string; banner?: string
 const TELEGRAM_MS = 15000;
 const SALES_CHAT = 'telegram_sales_chat_id';
 const STOCKS_CHAT = 'telegram_stocks_chat_id';
+const COFFEE_CHAT = 'telegram_coffee_chat_id';
+const isCafeId = (s: unknown) => typeof s === 'string' && /^[a-z0-9-]{1,48}$/.test(s);
 
 function botToken() {
   return (Deno.env.get('TELEGRAM_BOT_TOKEN') || '').trim();
@@ -209,13 +212,13 @@ async function chatId(k: string) {
 
 async function telegramFlags() {
   const token = botToken().length > 0;
-  const { data, error } = await db.from('app_secrets').select('k,v').in('k', [SALES_CHAT, STOCKS_CHAT]);
+  const { data, error } = await db.from('app_secrets').select('k,v').in('k', [SALES_CHAT, STOCKS_CHAT, COFFEE_CHAT]);
   if (error) {
     if (!missingRelation(error)) console.warn('telegram status unavailable', error.code || '');
-    return { token, salesChat: false, stocksChat: false };
+    return { token, salesChat: false, stocksChat: false, coffeeChat: false };
   }
   const on = (k: string) => (data || []).some((row) => row.k === k && !!usableChat(row.v));
-  return { token, salesChat: on(SALES_CHAT), stocksChat: on(STOCKS_CHAT) };
+  return { token, salesChat: on(SALES_CHAT), stocksChat: on(STOCKS_CHAT), coffeeChat: on(COFFEE_CHAT) };
 }
 
 async function telegramCall(method: string, body: FormData | Record<string, unknown>) {
@@ -326,6 +329,87 @@ async function announceMovement(op: 'restock' | 'receive', storeId: string, prod
   const line: StockMove = { branch: store?.name || storeId, name: product?.name || 'Product', qty, shelf: nextShelf, warehouse: nextWh };
   const text = movementMessage(op, [line]);
   if (text) await sendTelegramMessage(stocks, text);
+}
+
+function mapHours(value: unknown): DayHours[] {
+  if (!Array.isArray(value) || value.length !== 7) return defaultHours();
+  return value.map((day) => {
+    const row = day as { open?: unknown; close?: unknown; closed?: unknown };
+    return {
+      open: typeof row?.open === 'string' ? row.open : '08:00',
+      close: typeof row?.close === 'string' ? row.close : '19:00',
+      closed: Number(row?.closed) === 1 || row?.closed === true,
+    };
+  });
+}
+
+function mapCafeItem(row: { id: string; category_id: string; name: string; sizes: Record<string, number>; available: number; starred: number; must_try: number; seq: number }) {
+  return {
+    id: row.id,
+    categoryId: row.category_id,
+    name: row.name,
+    sizes: row.sizes || {},
+    available: row.available === 1,
+    starred: row.starred === 1,
+    mustTry: row.must_try === 1,
+    seq: row.seq,
+  };
+}
+
+async function loadCafe() {
+  const [settings, categories, items, addons] = await Promise.all([
+    db.from('cafe_settings').select('id,accepting,lead_min,slot_min,delivery_fee,hours').eq('id', 'main').maybeSingle(),
+    db.from('cafe_categories').select('id,name,seq,active').eq('active', 1).order('seq'),
+    db.from('cafe_items').select('id,category_id,name,sizes,available,starred,must_try,seq,active').eq('active', 1).order('seq'),
+    db.from('cafe_addons').select('id,name,price,seq,active').eq('active', 1).order('seq'),
+  ]);
+  for (const part of [settings, categories, items, addons]) {
+    if (part.error) {
+      if (missingRelation(part.error)) return null;
+      throw part.error;
+    }
+  }
+  if (!settings.data) return null;
+  return {
+    settings: settings.data,
+    categories: categories.data || [],
+    items: items.data || [],
+    addons: addons.data || [],
+  };
+}
+
+function cafeFail(error: { message?: string }, fallback: string) {
+  const message = error?.message || '';
+  if (/NOT_ACCEPTING/.test(message)) return new HttpError('The café is not taking orders right now', 409);
+  if (/BAD_SLOT/.test(message)) return new HttpError('That time just closed. Pick another.', 409);
+  if (/RATE/.test(message)) return new HttpError('Too many coffee orders under that name. Wait a bit and try again.', 429);
+  if (/BAD_STATUS/.test(message)) return new HttpError('That status is not the next step');
+  if (/BAD_ITEM|BAD_CAFE/.test(message)) return new HttpError(fallback, 409);
+  return null;
+}
+
+async function announceCafe(info: {
+  num: string;
+  fulfilment: 'pickup' | 'delivery';
+  area: string;
+  spot: string;
+  slot: Date;
+  items: CoffeeLine[];
+  deliveryFee: number;
+  total: number;
+  customer: string;
+  note: string;
+  proof: string;
+}) {
+  const chat = await chatId(COFFEE_CHAT);
+  if (!chat) return;
+  const caption = coffeeCaption(info);
+  let sent = false;
+  if (info.proof) {
+    const file = await proofBytes(info.proof);
+    if (file) sent = (await sendTelegramPhoto(chat, file.bytes, file.mime, caption)).ok;
+  }
+  if (!sent) await sendTelegramMessage(chat, caption);
 }
 
 async function sendResend(messages: { to: string; subject: string; html: string; unsub?: string }[]) {
@@ -441,6 +525,31 @@ Deno.serve(async (req) => {
       });
     }
 
+    if (path === '/api/cafe') {
+      const menu = await loadCafe();
+      if (!menu) return json({ ready: false });
+      const now = new Date();
+      const hours = mapHours(menu.settings.hours);
+      const accepting = menu.settings.accepting === 1;
+      const { data: cfg, error } = await db.from('config').select('k,v').in('k', banks);
+      if (error) throw error;
+      const saved = Object.fromEntries((cfg || []).map((row) => [row.k, row.v]));
+      return json({
+        ready: true,
+        name: CAFE_NAME,
+        place: CAFE_PLACE,
+        accepting,
+        deliveryFee: menu.settings.delivery_fee,
+        today: todayLabel(now, hours),
+        categories: menu.categories.map((row) => ({ id: row.id, name: row.name })),
+        items: menu.items.map(mapCafeItem),
+        addons: menu.addons.map((row) => ({ id: row.id, name: row.name, price: row.price })),
+        slots: cafeSlots({ now, hours, leadMin: menu.settings.lead_min, slotMin: menu.settings.slot_min, accepting }),
+        areas: AREAS,
+        banks: Object.fromEntries(banks.map((bank) => [bank, saved[bank] ?? null])),
+      });
+    }
+
     if (path === '/api/claim') {
       need(req.method === 'POST', 'Invalid request', 405);
       const { key: k } = await readJson(req);
@@ -526,6 +635,35 @@ Deno.serve(async (req) => {
         subscribers: subs.data?.map((row) => ({ id: row.id, email: row.email, storeId: row.store_id, active: row.active, ts: row.ts })) || [],
         sends: (sends.data || []).map((row) => ({ id: row.id, ts: row.ts, storeId: row.store_id, subject: row.subject, template: row.template, recipients: row.recipients, test: row.test })),
         telegram: await telegramFlags(),
+        cafe: await (async () => {
+          const menu = await loadCafe();
+          if (!menu) return { ready: false };
+          const orders = await db.from('cafe_orders').select('id,num,ts,items,subtotal,delivery_fee,total,fulfilment,area,spot,slot_at,customer,note,bank,proof,status').order('ts', { ascending: false }).limit(2000);
+          if (orders.error) {
+            if (missingRelation(orders.error)) return { ready: false };
+            throw orders.error;
+          }
+          const hours = mapHours(menu.settings.hours);
+          return {
+            ready: true,
+            settings: {
+              accepting: menu.settings.accepting === 1,
+              leadMin: menu.settings.lead_min,
+              slotMin: menu.settings.slot_min,
+              deliveryFee: menu.settings.delivery_fee,
+              hours,
+            },
+            categories: menu.categories.map((row) => ({ id: row.id, name: row.name, seq: row.seq })),
+            items: menu.items.map(mapCafeItem),
+            addons: menu.addons.map((row) => ({ id: row.id, name: row.name, price: row.price, seq: row.seq })),
+            orders: (orders.data || []).map((row) => ({
+              id: row.id, num: row.num, ts: row.ts, items: row.items, subtotal: row.subtotal,
+              deliveryFee: row.delivery_fee, total: row.total, fulfilment: row.fulfilment,
+              area: row.area, spot: row.spot, slotAt: row.slot_at, customer: row.customer,
+              note: row.note, bank: row.bank, proof: row.proof, status: row.status,
+            })),
+          };
+        })(),
         teamReady: !ownersMissing,
         owners: (ownersMissing && admin && who ? [{ user_id: who, email: whoEmail || 'owner', added_at: null }] : owners).map((row) => ({
           userId: row.user_id,
@@ -820,7 +958,7 @@ Deno.serve(async (req) => {
       need(req.method === 'POST', 'Invalid request', 405);
       const flags = await telegramFlags();
       need(flags.token, 'The bot token is not set', 503);
-      need(flags.salesChat || flags.stocksChat, 'The chat ids are not set', 503);
+      need(flags.salesChat || flags.stocksChat || flags.coffeeChat, 'The chat ids are not set', 503);
       const text = '<b>Chingu Honesty Store</b>\nThis is a test message. Telegram notifications are connected.';
       const sent: string[] = [];
       if (flags.salesChat) {
@@ -835,7 +973,138 @@ Deno.serve(async (req) => {
         need(result.ok, 'The stocks group did not accept the test message', 502);
         sent.push('stocks');
       }
-      return json({ ok: true, token: flags.token, salesChat: flags.salesChat, stocksChat: flags.stocksChat, sent });
+      if (flags.coffeeChat) {
+        const id = await chatId(COFFEE_CHAT);
+        const result = await sendTelegramMessage(id, text);
+        need(result.ok, 'The coffee group did not accept the test message', 502);
+        sent.push('coffee');
+      }
+      return json({ ok: true, token: flags.token, salesChat: flags.salesChat, stocksChat: flags.stocksChat, coffeeChat: flags.coffeeChat, sent });
+    }
+
+    if (path === '/api/admin/cafe-settings') {
+      need(req.method === 'POST', 'Invalid request', 405);
+      const menu = await loadCafe();
+      need(menu, 'Apply the café migration, then retry', 503);
+      const body = await readJson(req);
+      const hours = mapHours(body.hours);
+      need(hoursOk(hours), 'Check the café hours');
+      need(SLOT_CHOICES.includes(body.slotMin), 'Choose a 5, 10, 15, 20, 30, or 60 minute slot');
+      need(Number.isSafeInteger(body.leadMin) && body.leadMin >= 0 && body.leadMin <= 180, 'Lead time must be from 0 to 180 minutes');
+      const stored = hours.map((day) => ({ open: day.open, close: day.close, closed: day.closed ? 1 : 0 }));
+      const { error } = await db.from('cafe_settings').update({
+        accepting: body.accepting ? 1 : 0,
+        lead_min: body.leadMin,
+        slot_min: body.slotMin,
+        hours: stored,
+      }).eq('id', 'main');
+      if (error) throw cafeFail(error, 'Check the café hours') || error;
+      return json({ ok: true });
+    }
+
+    if (path === '/api/admin/cafe-category') {
+      need(req.method === 'POST', 'Invalid request', 405);
+      const menu = await loadCafe();
+      need(menu, 'Apply the café migration, then retry', 503);
+      const body = await readJson(req);
+      const id = body.id ? String(body.id).toLowerCase() : crypto.randomUUID();
+      need(isCafeId(id), 'Unknown category');
+      if (body.delete) {
+        const { count, error } = await db.from('cafe_items').select('id', { count: 'exact', head: true }).eq('category_id', id);
+        if (error) throw error;
+        need((count || 0) === 0, 'Move the drinks out of this category first');
+        const { error: e2 } = await db.from('cafe_categories').delete().eq('id', id);
+        if (e2) throw e2;
+        return json({ ok: true });
+      }
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      need(textOk(name, 40), 'Check the category name');
+      const taken = menu.categories.some((row) => row.id !== id && row.name.toLowerCase() === name.toLowerCase());
+      need(!taken, 'That category already exists', 409);
+      const existing = menu.categories.some((row) => row.id === id);
+      if (existing) {
+        const { error } = await db.from('cafe_categories').update({ name }).eq('id', id);
+        if (error) throw error;
+      } else {
+        const seq = menu.categories.reduce((max, row) => Math.max(max, row.seq || 0), 0) + 1;
+        const { error } = await db.from('cafe_categories').insert({ id, name, seq, active: 1 });
+        if (error) throw error;
+      }
+      return json({ ok: true, id });
+    }
+
+    if (path === '/api/admin/cafe-item') {
+      need(req.method === 'POST', 'Invalid request', 405);
+      const menu = await loadCafe();
+      need(menu, 'Apply the café migration, then retry', 503);
+      const body = await readJson(req);
+      const id = body.id ? String(body.id).toLowerCase() : crypto.randomUUID();
+      need(isCafeId(id), 'Unknown drink');
+      if (body.delete) {
+        const { error } = await db.from('cafe_items').delete().eq('id', id);
+        if (error) throw error;
+        return json({ ok: true });
+      }
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      const categoryId = typeof body.categoryId === 'string' ? body.categoryId : '';
+      need(textOk(name, 80), 'Check the drink name');
+      need(isCafeId(categoryId) && menu.categories.some((row) => row.id === categoryId), 'Choose a category');
+      need(sizesOk(body.sizes), 'Enter a price for at least one size');
+      const row = {
+        id,
+        category_id: categoryId,
+        name,
+        sizes: body.sizes,
+        available: body.available === false || body.available === 0 ? 0 : 1,
+        starred: body.starred ? 1 : 0,
+        must_try: body.mustTry ? 1 : 0,
+        active: 1,
+      };
+      const existing = menu.items.some((item) => item.id === id);
+      const { error } = existing
+        ? await db.from('cafe_items').update(row).eq('id', id)
+        : await db.from('cafe_items').insert({ ...row, seq: menu.items.reduce((max, item) => Math.max(max, item.seq || 0), 0) + 1 });
+      if (error) throw cafeFail(error, 'Check the sizes and prices') || error;
+      return json({ ok: true, id });
+    }
+
+    if (path === '/api/admin/cafe-addon') {
+      need(req.method === 'POST', 'Invalid request', 405);
+      const menu = await loadCafe();
+      need(menu, 'Apply the café migration, then retry', 503);
+      const body = await readJson(req);
+      const id = body.id ? String(body.id).toLowerCase() : crypto.randomUUID();
+      need(isCafeId(id), 'Unknown add-on');
+      if (body.delete) {
+        const { error } = await db.from('cafe_addons').delete().eq('id', id);
+        if (error) throw error;
+        return json({ ok: true });
+      }
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      need(textOk(name, 40) && cents(body.price, 0), 'Check the add-on');
+      const row = { id, name, price: body.price, active: 1 };
+      const existing = menu.addons.some((addon) => addon.id === id);
+      const { error } = existing
+        ? await db.from('cafe_addons').update(row).eq('id', id)
+        : await db.from('cafe_addons').insert({ ...row, seq: menu.addons.reduce((max, addon) => Math.max(max, addon.seq || 0), 0) + 1 });
+      if (error) throw error;
+      return json({ ok: true, id });
+    }
+
+    if (path === '/api/admin/cafe-status') {
+      need(req.method === 'POST', 'Invalid request', 405);
+      const body = await readJson(req);
+      need(isUuid(body.id) && typeof body.status === 'string', 'Unknown order');
+      const { data: order, error } = await db.from('cafe_orders').select('id,status,fulfilment').eq('id', body.id).maybeSingle();
+      if (error) {
+        if (missingRelation(error)) throw new HttpError('Apply the café migration, then retry', 503);
+        throw error;
+      }
+      need(order, 'Unknown order', 404);
+      need(nextCafeStatuses(order.fulfilment, order.status).includes(body.status), 'That status is not the next step');
+      const { error: e2 } = await db.from('cafe_orders').update({ status: body.status }).eq('id', body.id);
+      if (e2) throw cafeFail(e2, 'That status is not the next step') || e2;
+      return json({ ok: true });
     }
 
     if (path === '/api/admin/bank') {
@@ -875,6 +1144,105 @@ Deno.serve(async (req) => {
       const { data, error } = await db.storage.from(BUCKET).download(k);
       need(!error && data, 'Missing image', 404);
       return new Response(data, { headers: { ...ch, 'Content-Type': data.type || 'application/octet-stream', 'Cache-Control': k.startsWith('proof') ? 'private, no-store' : 'public, max-age=3600', 'X-Content-Type-Options': 'nosniff' } });
+    }
+
+    if (path === '/api/cafe/order') {
+      need(req.method === 'POST', 'Invalid request', 405);
+      const a = await readJson(req);
+      if (typeof a.company === 'string' && a.company.trim()) return json({ ok: true });
+      need(isUuid(a.id), 'Invalid checkout');
+      const menu = await loadCafe();
+      need(menu, 'Coffee orders are not open yet', 503);
+      const hours = mapHours(menu.settings.hours);
+      need(menu.settings.accepting === 1, 'The café is not taking orders right now', 409);
+      const now = new Date();
+      const slotOpts = { now, hours, leadMin: menu.settings.lead_min, slotMin: menu.settings.slot_min, accepting: true };
+      need(slotAllowed(a.slot, slotOpts), 'That time just closed. Pick another.', 409);
+      const fulfilment = a.fulfilment === 'delivery' ? 'delivery' : a.fulfilment === 'pickup' ? 'pickup' : '';
+      need(fulfilment, 'Choose pickup or delivery');
+      const customer = typeof a.customer === 'string' ? a.customer.trim() : '';
+      const note = typeof a.note === 'string' ? a.note.trim() : '';
+      need(textOk(customer, 80), 'Add your name so the café can find you');
+      need(note.length <= 200 && !/[\u0000-\u001f]/.test(note), 'Check the note');
+      let area = '';
+      let spot = '';
+      if (fulfilment === 'delivery') {
+        const areaId = typeof a.areaId === 'string' ? a.areaId : '';
+        const areaText = typeof a.areaText === 'string' ? a.areaText.trim() : '';
+        area = areaId === 'other' ? areaText : areaLabel(areaId, '');
+        need(areaId === 'other' ? textOk(areaText, 80) : AREAS.some((row) => row.id === areaId), 'Choose where to deliver');
+        spot = typeof a.spot === 'string' ? a.spot.trim() : '';
+        need(textOk(spot, 80), 'Tell us the desk or area');
+      }
+      need(Array.isArray(a.items) && a.items.length >= 1 && a.items.length <= 30, 'Check your drinks');
+      const items = a.items.map((raw: Record<string, unknown>) => {
+        const row = raw || {};
+        const drinkNote = typeof row.note === 'string' ? row.note.trim() : '';
+        const addons = Array.isArray(row.addons) ? row.addons.map((id) => String(id)) : [];
+        const item = menu.items.find((drink) => drink.id === row.id);
+        if (!item || item.available !== 1) throw new HttpError('That drink changed. Refresh the menu.', 409);
+        const size = typeof row.size === 'string' ? row.size : '';
+        if (!sizePrice(item.sizes as Record<string, number>, size)) throw new HttpError('Check the size', 409);
+        need(Number.isSafeInteger(row.qty) && (row.qty as number) >= 1 && (row.qty as number) <= 20, 'Check the quantity');
+        need(drinkNote.length <= 80 && !/[\u0000-\u001f]/.test(drinkNote), 'Check the drink note');
+        need(addons.length <= 8 && new Set(addons).size === addons.length && addons.every((id) => menu.addons.some((addon) => addon.id === id)), 'Check the add-ons', 409);
+        return { id: String(row.id), size, qty: row.qty, note: drinkNote, addons };
+      });
+      need(banks.includes(a.bank) && await val(a.bank) && fileProof(a.proof) && await objectExists(String(a.proof).slice(6)), 'Upload your payment screenshot');
+      const { data: placed, error } = await db.rpc('place_cafe_order', {
+        p_id: a.id,
+        p_items: items,
+        p_fulfilment: fulfilment,
+        p_area: area,
+        p_spot: spot,
+        p_slot: new Date(String(a.slot)).toISOString(),
+        p_customer: customer,
+        p_note: note,
+        p_bank: a.bank,
+        p_proof: a.proof,
+      });
+      if (error || !placed) {
+        const again = await db.from('cafe_orders').select('id,num,total,subtotal,delivery_fee,items,slot_at,fulfilment,area,spot,customer,note').eq('id', a.id).maybeSingle();
+        if (again.data) {
+          const saved = again.data;
+          return json({
+            id: saved.id, num: saved.num, total: saved.total, subtotal: saved.subtotal, deliveryFee: saved.delivery_fee,
+            items: saved.items, slot: saved.slot_at, fulfilment: saved.fulfilment, area: saved.area, spot: saved.spot,
+            customer: saved.customer, note: saved.note, store: CAFE_NAME,
+            whenLine: receiptWhen(saved.fulfilment, new Date(saved.slot_at), saved.area, saved.spot),
+          });
+        }
+        throw (error && cafeFail(error, 'That drink changed. Refresh the menu.')) || error || new HttpError('That drink changed. Refresh the menu.', 409);
+      }
+      const slot = new Date(placed.slot);
+      const whenLine = receiptWhen(placed.fulfilment, slot, placed.area || '', placed.spot || '');
+      if (!placed.existing) {
+        const lines: CoffeeLine[] = (placed.items || []).map((row: { name: string; size: string; qty: number; addons?: { name: string }[]; note?: string }) => ({
+          name: row.name,
+          size: row.size,
+          qty: row.qty,
+          addons: (row.addons || []).map((addon) => addon.name),
+          note: row.note || '',
+        }));
+        defer(announceCafe({
+          num: String(placed.num || ''),
+          fulfilment: placed.fulfilment,
+          area: placed.area || '',
+          spot: placed.spot || '',
+          slot,
+          items: lines,
+          deliveryFee: placed.deliveryFee | 0,
+          total: placed.total | 0,
+          customer: placed.customer || '',
+          note: placed.note || '',
+          proof: fileProof(a.proof) ? String(a.proof) : '',
+        }));
+      }
+      return json({
+        id: placed.id, num: placed.num, total: placed.total, subtotal: placed.subtotal, deliveryFee: placed.deliveryFee,
+        items: placed.items, slot: placed.slot, fulfilment: placed.fulfilment, area: placed.area || '', spot: placed.spot || '',
+        customer: placed.customer || '', note: placed.note || '', store: CAFE_NAME, whenLine,
+      });
     }
 
     if (path === '/api/order') {

@@ -523,15 +523,48 @@ function buildPdf(lines) {
     return buildPdf(lines);
   }
 
+  function formatManila(date) {
+    var parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Manila',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true
+    }).formatToParts(new Date(date));
+    var get = function (type) { return (parts.find(function (part) { return part.type === type; }) || {}).value || ''; };
+    return get('month') + ' ' + get('day') + ', ' + get('year') + ' · ' + get('hour') + ':' + get('minute') + ' ' + get('dayPeriod').toUpperCase();
+  }
+
+  function cafeSales(orders, start, end) {
+    var total = 0, count = 0;
+    (orders || []).forEach(function (order) {
+      if (!order || order.status === 'Cancelled') return;
+      if (start && end && !inRange(order.ts, start, end)) return;
+      total += order.total || 0;
+      count++;
+    });
+    return { total: total, orders: count };
+  }
+
   function receiptModel(order) {
     return {
       num: order.num || '',
       store: order.storeName || order.storeId || '',
       when: order.ts,
       items: linesOf(order).map(function (line) {
-        return { name: line.name, qty: line.qty, price: line.price, line: (line.price || 0) * (line.qty || 0) };
+        return {
+          name: line.name,
+          qty: line.qty,
+          price: line.price,
+          line: (line.price || 0) * (line.qty || 0),
+          detail: line.detail || ''
+        };
       }),
-      total: order.total || 0
+      total: order.total || 0,
+      whenLine: order.whenLine || '',
+      forName: order.forName || ''
     };
   }
 
@@ -582,6 +615,8 @@ function buildPdf(lines) {
     priceFromMarkup: priceFromMarkup,
     markupFromPrice: markupFromPrice,
     formatOrderNo: formatOrderNo,
+    formatManila: formatManila,
+    cafeSales: cafeSales,
     startOfManilaDay: startOfManilaDay,
     startOfManilaWeek: startOfManilaWeek,
     startOfManilaMonth: startOfManilaMonth,
